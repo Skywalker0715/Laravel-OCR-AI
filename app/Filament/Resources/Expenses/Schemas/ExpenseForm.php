@@ -14,18 +14,42 @@ class ExpenseForm
         return $schema
             ->components([
                 TextInput::make('title')
-                    ->required(),
-                TextInput::make('date_shopping'),
-                TextInput::make('change')
-                    ->numeric(),
-                TextInput::make('amount')
-                    ->numeric(),
-                Textarea::make('note')
-                    ->columnSpanFull(),
+                    ->required()
+                    ->label('Judul Belanja')
+                    ->placeholder('Masukkan judul belanja...'),
+
                 FileUpload::make('receipt_image')
+                    ->label('Foto Struk')
                     ->image()
-                    ->disk('public'),
-                TextInput::make('parsed_data'),
+                    ->disk('public')
+                    ->required()
+                    ->directory('receipts')
+                    ->imagePreviewHeight('250')
+                    ->loadingIndicatorPosition('left')
+                    ->panelAspectRatio('2:1')
+                    ->panelLayout('integrated')
+                    ->removeUploadedFileButtonPosition('right')
+                    ->uploadButtonPosition('left')
+                    ->uploadProgressIndicatorPosition('left'),
+
+                // Field teknis disembunyikan dari form, akan diisi otomatis oleh sistem
+                TextInput::make('date_shopping')
+                    ->hidden(),
+
+                TextInput::make('change')
+                    ->hidden()
+                    ->numeric(),
+
+                TextInput::make('amount')
+                    ->hidden()
+                    ->numeric(),
+
+                Textarea::make('note')
+                    ->hidden()
+                    ->columnSpanFull(),
+
+                TextInput::make('parsed_data')
+                    ->hidden(),
             ]);
     }
 }

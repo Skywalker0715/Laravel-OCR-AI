@@ -29,4 +29,34 @@ Class Helper {
     }
 }
 
+    public function extractSpecialFieldsAndCleanItems(array $items): array
+    {
+        $extractedFields = ['kembalian' => 0];
+        $cleanedItems = [];
+
+        foreach ($items as $item) {
+            $name = strtolower($item['name'] ?? '');
+            if (str_contains($name, 'kembalian') || str_contains($name, 'change') || str_contains($name, 'kembali')) {
+                // Extract numeric value from name, subtotal, or price
+                $value = 0;
+                if (isset($item['subtotal'])) {
+                    $value = (float) str_replace(['Rp', ',', '.'], '', $item['subtotal']);
+                } elseif (isset($item['price'])) {
+                    $value = (float) str_replace(['Rp', ',', '.'], '', $item['price']);
+                } elseif (preg_match('/(\d+(?:,\d+)?)/', $name, $matches)) {
+                    $value = (float) str_replace(',', '', $matches[1]);
+                }
+                $extractedFields['kembalian'] = $value;
+                // Skip adding to cleaned items
+                continue;
+            }
+            $cleanedItems[] = $item;
+        }
+
+        return [
+            'extractedFields' => $extractedFields,
+            'items' => $cleanedItems
+        ];
+    }
+
 }

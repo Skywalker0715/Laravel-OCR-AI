@@ -16,6 +16,7 @@ class Expense extends Model
         'parsed_data',
         'date_shopping',
         'change',
+        'vendor',
     ];
 
      public function items(): HasMany
