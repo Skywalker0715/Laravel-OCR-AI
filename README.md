@@ -1,145 +1,143 @@
-# Catatan Belanja - Receipt Expense Tracker
+﻿# Catatan Belanja - Aplikasi Pencatat Pengeluaran Berbasis OCR + AI
 
-## Overview
+Aplikasi web untuk mencatat pengeluaran dari foto struk belanja: unggah foto struk, teks dibaca otomatis (OCR Tesseract), lalu di-parsing menjadi data terstruktur (vendor, tanggal, kategori, item, total, kembalian) oleh AI (Cohere) dengan fallback regex bila API gagal. Hasilnya tersimpan di PostgreSQL dan dikelola lewat panel admin Filament.
 
-Catatan Belanja is a mini project built with Laravel, designed to simplify expense tracking from shopping receipts. Users can upload receipt images, which are automatically processed using OCR (Optical Character Recognition) to extract text. The extracted text is then parsed using AI (Cohere API with fallback regex parsing) to structure the data into JSON format, including vendor, date, items (with qty, price, subtotal), total amount, and change. The structured data is saved to a PostgreSQL database and managed via a user-friendly admin panel built with Filament.
+Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-user, kategori pengeluaran usaha).
 
-This project demonstrates integration of OCR, AI parsing, queue jobs, and modern web admin interfaces for a practical expense management tool.
+## Fitur
 
-## Features
-
-- **Receipt Upload & OCR**: Upload images of receipts; Tesseract OCR extracts text (supports Indonesian and English).
-- **AI-Powered Parsing**: Uses Cohere AI to parse OCR text into structured JSON (vendor, date, items, total, change). Includes a robust fallback parser using regex for offline reliability.
-- **Admin Panel**: Filament-based CRUD for expenses and items – create, view, edit, list with image previews and item counts.
-- **Queue Processing**: Asynchronous job handling for OCR and AI parsing to avoid blocking the UI.
-- **Data Storage**: PostgreSQL database with Eloquent models for Expenses and ExpenseItems.
-- **User-Friendly UI**: Indonesian labels (e.g., "Judul Belanja", "Foto Struk"), image thumbnails in tables, numeric formatting for amounts.
-- **Error Handling**: Logs for debugging, fallback on AI failure, validation on forms.
+- **Upload struk + OCR** - Tesseract OCR (bahasa Indonesia + Inggris), kompresi gambar otomatis (GD) sebelum diproses.
+- **Parsing AI + fallback** - Cohere mengubah teks OCR menjadi JSON terstruktur; bila API gagal atau tidak ada key, parser regex bawaan mengambil alih otomatis. Jalur parsing (AI / estimasi) tampil di halaman detail.
+- **Panel admin Filament v4** - CRUD Expenses (beserta item belanja), Categories, dan Budgets; preview foto, badge status parsing, polling otomatis hasil parsing, tombol "Proses Ulang OCR & AI".
+- **Kategori** - kategori default sistem (dipakai bersama semua user, read-only) + kategori pribadi per user; tebakan kategori otomatis dari vendor/item.
+- **Budget bulanan + notifikasi** - anggaran per kategori atau umum per bulan; notifikasi otomatis saat pemakaian menyentuh 90% dan 100% (masing-masing sekali per periode) lewat lonceng notifikasi database Filament.
+- **Halaman Laporan** - filter rentang tanggal / bulan + multi-kategori, ringkasan, grafik kategori, export **Excel (.xlsx)** dan **PDF**.
+- **Dashboard** - statistik total/jumlah/rata-rata + grafik garis riwayat pengeluaran.
+- **Multi-user** - setiap user hanya melihat data miliknya (global scope `OwnedByUserScope`).
+- **Notifikasi parsing** - hasil parsing (sukses / estimasi / gagal-total) dikirim ke database notification berisi link "Periksa & Edit".
+- **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan).
 
 ## Tech Stack
 
-- **Backend**: Laravel 12 (PHP framework for API and logic).
-- **Admin Panel**: Filament v3 (TALL stack: Tailwind CSS, Alpine.js, Livewire, Laravel) for forms, tables, and pages.
-- **OCR**: Tesseract OCR via `thiagoalessio/tesseract_ocr` PHP wrapper (lang: 'ind,eng' for Indonesian receipts).
-- **AI Parsing**: Cohere AI API (Chat endpoint with 'command' models; enhanced prompt for Indonesian struk extraction). Fallback: Custom regex/keyword parser in Helper/AIParserService.
-- **Database**: PostgreSQL (migrations for users, expenses, expense_items; added vendor column).
-- **Queue/Jobs**: Laravel Queue with AIParserJob for async processing (dispatch after OCR).
-- **File Storage**: Laravel Filesystem (public disk for receipt images; symlink via `storage:link`).
-- **Other**: 
-  - Eloquent ORM for models (Expense, ExpenseItem with relations).
-  - HTTP Client for Cohere API calls.
-  - Logging (Laravel Log facade for OCR/AI/job debugging).
-  - Vite for asset bundling (Tailwind CSS, JS).
+- Laravel 12 (PHP ^8.2)
+- Filament v4 (panel admin)
+- PostgreSQL
+- Tesseract OCR (`thiagoalessio/tesseract_ocr`)
+- Cohere API (parsing AI) + parser regex fallback
+- GD (kompresi / pra-proses gambar)
+- `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
+- Pest (testing)
 
-Dependencies (from composer.json):
-- `filament/filament` for admin.
-- `thiagoalessio/tesseract_ocr` for OCR.
-- Laravel Sanctum/Breeze for auth (if extended).
+## Requirement
 
-## Installation
+- PHP >= 8.2 dengan ekstensi `pdo_pgsql`, `gd`, `mbstring`
+- Composer, Node.js + npm (build aset Vite)
+- PostgreSQL >= 13
+- **Tesseract OCR** ter-install di server + language data `ind` dan `eng`
+  (Windows: installer UB-Mannheim; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
+- Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
 
-1. **Clone the Repo**:
-   ```
-   git clone https://github.com/yourusername/catatan-belanja.git
+## Instalasi
+
+1. Clone repo lalu install dependency:
+   ```bash
+   git clone <url-repo>
    cd catatan-belanja
-   ```
-
-2. **Install Dependencies**:
-   ```
    composer install
-   npm install
+   npm install && npm run build
    ```
 
-3. **Environment Setup**:
-   - Copy `.env.example` to `.env`.
-   - Set database: `DB_CONNECTION=pgsql`, configure PostgreSQL credentials.
-   - Add Cohere API key: `COHERE_API_KEY=your_key_here` (optional; fallback works without).
-   - Generate app key: `php artisan key:generate`.
-
-4. **Database & Migrations**:
+2. Salin `.env.example` menjadi `.env`, lalu sesuaikan:
+   ```env
+   DB_CONNECTION=pgsql
+   DB_HOST=127.0.0.1
+   DB_PORT=5432
+   DB_DATABASE=catatan_belanja
+   DB_USERNAME=...
+   DB_PASSWORD=...
+   COHERE_API_KEY=      # opsional
+   APP_DEBUG=false      # WAJIB false di production
    ```
+   Kemudian generate app key:
+   ```bash
+   php artisan key:generate
+   ```
+
+3. Migrasi + seed (membuat 1 akun admin dan kategori default):
+   ```bash
    php artisan migrate
-   php artisan db:seed  # Optional: Seed users
+   php artisan db:seed
    ```
 
-5. **Storage Link**:
-   ```
-   php artisan storage:link  # Symlink public/storage to storage/app/public
-   ```
-
-6. **Install Tesseract** (system dependency for OCR):
-   - Windows: Download from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki), add to PATH.
-   - Ensure `tesseract` executable is accessible.
-
-7. **Run Queue Worker** (for jobs):
-   ```
-   php artisan queue:work  # In separate terminal
+4. Symlink storage (untuk asset publik):
+   ```bash
+   php artisan storage:link
    ```
 
-8. **Serve the App**:
-   ```
-   php artisan serve
-   npm run dev  # For assets
-   ```
+## Menjalankan Aplikasi
 
-Access the admin panel at `/admin` (login with seeded user or create one).
+> **PENTING - queue worker wajib berjalan.** Parsing OCR + AI dijalankan async lewat `AIParserJob`. Ada dua mode:
 
-## Usage
+**Mode A - `QUEUE_CONNECTION=database` (default, disarankan untuk production):**
 
-1. **Create Expense**:
-   - Go to Admin > Expenses > Create.
-   - Enter title (e.g., "Belanja Bulanan").
-   - Upload receipt image (JPG/PNG).
-   - Submit – OCR extracts text to note, job parses and populates fields (date, amount, change, items).
+```bash
+php artisan serve           # terminal 1
+php artisan queue:work      # terminal 2 - WAJIB, jangan sampai lupa!
+```
 
-2. **View List**:
-   - Expenses table shows title, date, change, amount, image thumbnail (clickable), item count.
-   - View/Edit individual expenses for details.
+Tanpa worker, hasil parsing tidak akan pernah terisi. Dashboard punya pengaman: bila ada job tertahan lebih dari 5 menit, muncul peringatan "Antrian parsing terhambat". Perintah berguna:
 
-3. **Processing Flow**:
-   - Upload → OCR (Tesseract extracts text) → Save note → Dispatch job.
-   - Job: AI parse (Cohere or fallback) → Update Expense → Create ExpenseItems.
-   - Refresh list to see parsed data (no manual input needed).
+```bash
+php artisan queue:restart       # restart worker setelah deploy
+php artisan queue:failed        # daftar job yang gagal
+php artisan queue:retry all     # ulangi job yang gagal
+```
 
-Example: Upload a struk image → Extracts "Karis Jaya Shop", date "2023-08-02", items (Indomie qty 1 @36000), total 70000, change 0 → Saves structured data.
+**Mode B - `QUEUE_CONNECTION=sync` (tanpa worker, untuk personal / dev):**
 
-## How It Works
+Parsing dieksekusi langsung saat upload, jadi tidak perlu worker. Trade-off: request upload menjadi sedikit lebih lama karena menunggu OCR + AI selesai.
 
-1. **Form (Filament)**: Custom ExpenseForm schema with visible title/image, hidden parsed fields. FileUpload to public disk.
-2. **afterCreate Hook**: In CreateExpense page – OCRService extracts text from image path, saves to note, dispatches AIParserJob.
-3. **OCRService**: Uses TesseractOCR to run on image (lang 'ind,eng' for mixed text).
-4. **AIParserJob**: 
-   - AIParserService: HTTP to Cohere (/v1/chat, prompt for JSON: vendor/date/items/total/change).
-   - cleanCohereResponse (Helper): Strips non-JSON, decodes.
-   - Fallback: Regex scans lines for patterns (e.g., date \d{4}-\d{2}-\d{2}, items \d+ .+ x \d+, total/kembalian).
-5. **Storage**: Updates Expense model, creates ExpenseItems via hasMany relation.
-6. **Table (ExpensesTable)**: ImageColumn with getStateUsing for URL, size 120px square thumbnail; withCount('items') for count.
+Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`) atau registrasi akun baru (lihat catatan keamanan di bawah).
 
-Logs in `storage/logs/laravel.log` for debugging (e.g., "Raw OCR text", "Fallback parsed data").
+## Upgrade dari Versi Lama (opsional)
 
-## Potential Improvements
+Bila memakai versi lama aplikasi (foto struk masih di `storage/app/public/receipts`), pindahkan ke disk privat baru:
 
-- Integrate real Cohere key for AI (current fallback is robust but AI could handle complex layouts better).
-- Add user auth/roles in Filament.
-- Export reports (PDF/CSV of expenses).
-- Improve OCR accuracy (pre-process images with ImageMagick).
-- Mobile upload via API endpoint.
-- Tests: Add Pest/PHPUnit for services/jobs.
+```bash
+php artisan receipts:move-to-private-disk
+```
 
-## Contributing
+Command aman dijalankan berulang (idempotent) dan memverifikasi setiap file sebelum menghapus salinan lamanya.
 
-1. Fork the repo.
-2. Create branch: `git checkout -b feature/your-feature`.
-3. Commit: `git commit -m "Add feature"`.
-4. Push: `git push origin feature/your-feature`.
-5. Open PR to main.
+## Testing
 
-Report issues or suggest enhancements!
+```bash
+php artisan test
+```
 
-## License
+Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifikasi, halaman Laporan/Export, dan route foto struk.
 
-MIT License – feel free to use/modify.
+## Catatan Keamanan untuk Pembeli/Developer
 
----
+- **Authorization via global scope, bukan Policy.** Aplikasi ini tidak memakai Laravel Policy - isolasi data per-user sepenuhnya lewat global scope `OwnedByUserScope` (model Expense & Budget) ditambah override query di resource Category. Kalau menambah endpoint/route baru **di luar Filament**, tambahkan authorization check manual.
+- **Registrasi terbuka secara default.** Siapa pun bisa mendaftar lewat halaman registrasi panel. Cara menonaktifkan: hapus/comment baris `->registration(Register::class)` di `app/Providers/Filament/AdminPanelProvider.php`.
+- **`OwnedByUserScope` tidak aktif untuk request tanpa auth** (by design, agar queue/console bisa memproses data). Kalau menambah route **publik** yang mem-query model `Expense`/`Budget`/`Category`, WAJIB tambahkan filter `user_id` manual.
+- **Set `APP_DEBUG=false` di environment production.** Halaman debug dapat membocorkan stack trace dan isi `.env`.
+- **Foto struk disimpan di disk privat** (`receipts` - `storage/app/private/receipts`), BUKAN lagi di `public/storage`. Penyajian hanya lewat route `/receipt-image/{expense}` dengan authorization check (hanya pemilik expense; user lain dan tamu tidak mendapat akses).
+- Kredensial apa pun hanya boleh ada di `.env` (tidak pernah di-commit); `.env.example` disediakan bersih sebagai template.
 
-Built with ❤️ for expense tracking. Questions? Open an issue!
+## Struktur Penting
+
+```
+app/Filament/Resources/     Resource admin panel (Expenses, Categories, Budgets)
+app/Services/               OCRService, AIParserService, Helper, BudgetAlertService, ImageCompressor
+app/Jobs/AIParserJob.php    Job parsing async (teks OCR -> AI/fallback -> database)
+app/Support/                MoneyFormatter, ReportFilter
+app/Models/Scopes/          OwnedByUserScope (isolasi data per-user)
+app/Console/Commands/       expenses:reprocess, expenses:assign-default-category,
+                            receipts:move-to-private-disk
+```
+
+## Lisensi
+
+MIT - bebas digunakan dan dimodifikasi untuk project pribadi maupun klien.

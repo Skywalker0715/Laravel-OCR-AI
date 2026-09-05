@@ -8,8 +8,12 @@ use App\Models\Expense;
 
 class ExpenseItem extends Model
 {
+    // `expenses_id` SENGAJA tidak ada di $fillable: FK tidak boleh di-assign
+    // sembarangan lewat mass assignment. FK diset otomatis oleh relasi
+    // $expense->items()->create([...]) (HasMany::setAttribute, dipakai
+    // AIParserJob) maupun Repeater Filament — keduanya tidak butuh
+    // expenses_id di $fillable.
     protected $fillable = [
-        'expenses_id',
         'name',
         'qty',
         'price',
@@ -18,7 +22,6 @@ class ExpenseItem extends Model
 
     public function expense(): BelongsTo
     {
-    return $this->belongsTo(related: Expense::class, foreignKey: 'expenses_id');
+        return $this->belongsTo(related: Expense::class, foreignKey: 'expenses_id');
     }
-    
 }

@@ -47,6 +47,20 @@ return [
             'report' => false,
         ],
 
+        // Disk privat khusus foto struk (temuan audit keamanan #2): file
+        // fisik berada DI LUAR folder public (storage/app/private/receipts)
+        // sehingga tidak bisa diakses lewat /storage. Penyajian hanya lewat
+        // route terotorisasi /receipt-image/{expense} (pemilik saja).
+        // Root = storage/app/private agar nilai kolom expenses.receipt_image
+        // yang sudah tersimpan (mis. "receipts/xxx.jpg") tetap valid.
+        'receipts' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private'),
+            'visibility' => 'private',
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

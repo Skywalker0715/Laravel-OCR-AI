@@ -23,6 +23,67 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+    {{-- ============================================================
+         PREFETCH ASSET ADMIN PANEL (FILAMENT)
+         Browser mulai mengunduh CSS/JS panel admin di background saat
+         user masih membaca landing page — sebelum klik "Masuk"/"Daftar" —
+         sehingga transisi ke /admin terasa instan.
+
+         URL dibuat otomatis dari registrasi FilamentAsset, jadi versi
+         (?v=...) dan path selalu sinkron dengan package terpasang.
+         Setelah `composer update` (upgrade Filament/Livewire), jalankan
+         ulang: `php artisan filament:assets`.
+         ============================================================ --}}
+    @php
+        $filamentPrefetch = collect();
+
+        // CSS tema panel (render-blocking, file terbesar dari sisi styling).
+        $filamentPrefetch->push([
+            'href' => \Filament\Facades\Filament::getDefaultPanel()->getTheme()->getHref(),
+            'as' => 'style',
+        ]);
+
+        // JavaScript inti panel (kecuali komponen yang memang on-demand,
+        // mis. rich editor / file upload — tidak perlu di-prefetch).
+        collect(\Filament\Support\Facades\FilamentAsset::getScripts())
+            ->reject(fn ($asset) => $asset->isRemote())
+            ->each(fn ($asset) => $filamentPrefetch->push([
+                'href' => $asset->getSrc(),
+                'as' => 'script',
+            ]));
+
+        // JavaScript inti Livewire (dilayani dari vendor, bukan folder public).
+        $livewireSrc = rescue(function (): ?string {
+            $manifest = json_decode(
+                file_get_contents(base_path('vendor/livewire/livewire/dist/manifest.json')),
+                true,
+            );
+
+            $routeUri = config('livewire.asset_url')
+                ?: app(\Livewire\Mechanisms\FrontendAssets\FrontendAssets::class)->javaScriptRoute?->uri;
+
+            if (blank($routeUri)) {
+                return null;
+            }
+
+            return (string) str($routeUri)->start('/')
+                . '?id='
+                . ($manifest['/livewire.js'] ?? '');
+        });
+
+        if ($livewireSrc) {
+            $filamentPrefetch->push(['href' => $livewireSrc, 'as' => 'script']);
+        }
+    @endphp
+
+    @foreach ($filamentPrefetch as $prefetchAsset)
+        <link
+            rel="prefetch"
+            href="{{ $prefetchAsset['href'] }}"
+            as="{{ $prefetchAsset['as'] }}"
+        >
+    @endforeach
 </head>
 <body class="font-sans antialiased bg-white text-slate-800">
 
@@ -38,12 +99,21 @@
                     <a href="#" data-scroll-target="cara-kerja" class="hover:text-emerald-600 transition-colors">Cara Kerja</a>
                     <a href="#" data-scroll-target="fitur" class="hover:text-emerald-600 transition-colors">Fitur</a>
                 </nav>
-                <a href="/admin" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 rounded-lg shadow-md shadow-emerald-600/20 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-600/30 hover:-translate-y-0.5">
-                    Masuk
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                </a>
+                <div class="flex items-center gap-3">
+                    <!-- "Daftar" — aksi sekundary (outline hijau, background transparan) -->
+                    <a href="/admin/register" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-emerald-700 border border-emerald-400 bg-transparent hover:bg-emerald-50 hover:border-emerald-500 rounded-lg transition-all duration-200 hover:-translate-y-0.5">
+                        Daftar
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15M6 12h11" />
+                        </svg>
+                    </a>
+                    <a href="/admin" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 rounded-lg shadow-md shadow-emerald-600/20 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-600/30 hover:-translate-y-0.5">
+                        Masuk
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                        </svg>
+                    </a>
+                </div>
             </div>
         </div>
     </header>

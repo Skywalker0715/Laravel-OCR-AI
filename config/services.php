@@ -35,4 +35,12 @@ return [
         ],
     ],
 
+        'cohere' => [
+        'api_key' => env('COHERE_API_KEY'),
+        // 'command-light' sudah tidak tersedia di Cohere (hapus Sep 2025).
+        // Model default memakai tanggal yang benar-benar terdaftar;
+        // override lewat .env (COHERE_MODEL) bila ingin model lain.
+        'model' => env('COHERE_MODEL', 'command-r-08-2024'),
+    ],
+
 ];

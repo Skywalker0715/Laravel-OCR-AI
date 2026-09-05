@@ -96,9 +96,18 @@ return [
             'prefix_indexes' => true,
             'schema' => 'public',
             'sslmode' => 'prefer',
-            'options'   => extension_loaded('pdo_pgsql') ? [
-                 PDO::ATTR_EMULATE_PREPARES => true,
-               ] : [],
+            // EMULATE_PREPARES sengaja TIDAK diaktifkan (kembali ke perilaku
+            // default PDO pgsql = native prepares).
+            //
+            // Dengan emulated prepares, PostgreSQL tidak bisa meng-infer tipe
+            // parameter dari konteks query. Laravel mengirim binding boolean
+            // sebagai integer 1/0 (lewat prepareBindings), sehingga tulis ke
+            // kolom boolean gagal dengan SQLSTATE[42804]: "column "used_fallback"
+            // is of type boolean but expression is of type integer" — bug yang
+            // merusak simpanan hasil parsing AIParserJob untuk expense id 16-20
+            // (2026-09-03). Dengan native prepares, PG meng-infer tipe parameter
+            // dari konteks dan binding boolean berjalan normal.
+            'options' => [],
         ],
 
         'sqlsrv' => [
