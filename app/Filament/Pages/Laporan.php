@@ -38,24 +38,9 @@ use Maatwebsite\Excel\Facades\Excel;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
- * Halaman Laporan: ringkasan, grafik, tabel, dan export (PDF/Excel) dari
- * pengeluaran milik user yang sedang login untuk periode & kategori yang
- * dipilih.
- *
- * Struktur mengikuti pola resmi Filament v4:
- *  - Form filter didefinisikan sebagai schema bernama "filtersForm"
- *    (sama seperti filtersForm Dashboard), di-embed via EmbeddedSchema,
- *    dan ber-status ->live() sehingga filter langsung diterapkan.
- *  - Widget ringkasan & grafik di-embed lewat getWidgetsSchemaComponents();
- *    karena halaman ini punya properti "filters", setiap widget otomatis
- *    menerima nilai filter terbaru via properti Livewire "pageFilters"
- *    (lihat trait InteractsWithPageFilters).
- *  - Tabel daftar transaksi didefinisikan lewat table() + InteractsWithTable
- *    dan di-embed via EmbeddedTable (pola sama seperti ListRecords) sehingga
- *    dapat diurutkan per kolom & ter-paginate.
- *
- * Satu query terpusat (filteredExpensesQuery()) menjadi sumber kebenaran
- * untuk tabel, widget, dan export agar angka selalu konsisten.
+ * Halaman Laporan: ringkasan, grafik, tabel, dan export PDF/Excel dari expense milik
+ * user yang login sesuai filter periode & kategori. Pola Filament v4: filtersForm
+ * live → pageFilters ke widget; tabel via InteractsWithTable.
  */
 class Laporan extends Page implements HasTable
 {
@@ -71,17 +56,7 @@ class Laporan extends Page implements HasTable
 
     protected string $view = 'filament.pages.laporan';
 
-    /**
-     * State form filter halaman (period_mode, date_from, date_until, month,
-     * year, category_ids).
-     *
-     * Nama properti WAJIB "filters": getWidgetsSchemaComponents() otomatis
-     * meneruskannya ke setiap widget yang di-embed sebagai properti Livewire
-     * "pageFilters", sehingga widget ringkasan & grafik selalu mengikuti
-     * filter terbaru tanpa wiring manual.
-     *
-     * @var array<string, mixed>|null
-     */
+    /** State form filter; nama properti WAJIB "filters" agar widget ter-embed otomatis menerimanya sebagai $pageFilters. */
     public ?array $filters = null;
 
     /**
@@ -124,12 +99,7 @@ class Laporan extends Page implements HasTable
 
     }
 
-    /**
-     * Nilai default form filter: mode rentang tanggal dengan kedua tanggal
-     * kosong (= semua periode) dan tanpa filter kategori.
-     *
-     * @return array<string, mixed>
-     */
+    /** Nilai default filter: mode rentang tanggal (semua periode), tanpa kategori terpilih. */
     private function defaultFilters(): array
     {
         return [
@@ -241,12 +211,8 @@ class Laporan extends Page implements HasTable
     }
 
     /**
-     * Tabel daftar transaksi hasil filter. Semua kolom dapat diurutkan
-     * (sortable) dan bisa dicari; default urutan terbaru berdasarkan
-     * created_at — sengaja BUKAN date_shopping karena tanggal belanja bisa
-     * NULL (struk yang parsing-nya belum selesai) dan perilaku NULLS
-     * FIRST/LAST berbeda antara PostgreSQL dan MySQL (pola yang sama dengan
-     * Category::recentExpensesForUser()).
+     * Tabel transaksi hasil filter. Sort default created_at (bukan date_shopping,
+     * yang bisa NULL dan NULLS-FIRST berbeda antar driver database).
      */
     public function table(Table $table): Table
     {
@@ -330,10 +296,7 @@ class Laporan extends Page implements HasTable
     }
 
     /**
-     * Query expense hasil filter — SATU sumber kebenaran untuk tabel, widget,
-     * dan export. Expense dengan amount NULL (struk yang parsing-nya belum
-     * selesai) tidak ikut dihitung; kepemilikan data dijaga global scope
-     * OwnedByUserScope pada model Expense.
+     * Query expense hasil filter — sumber kebenaran tabel, widget, dan export.
      */
     public function filteredExpensesQuery(): Builder
     {
@@ -370,11 +333,7 @@ class Laporan extends Page implements HasTable
     }
 
     /**
-     * Export hasil laporan ke PDF via barryvdh/laravel-dompdf.
-     *
-     * Mengembalikan StreamedResponse (bukan unduhan biasa) karena pola ini
-     * paling andal dikirim dari aksi Livewire: file tetap ter-download walau
-     * output buffering bawaan Livewire aktif.
+     * Export PDF via dompdf; memakai StreamedResponse agar andal dikirim dari aksi Livewire.
      */
     public function exportPdf(): StreamedResponse
     {
@@ -388,11 +347,8 @@ class Laporan extends Page implements HasTable
     }
 
     /**
-     * Susun dokumen PDF laporan (kop, ringkasan, breakdown kategori, dan
-     * daftar transaksi) dari expense yang sudah ter-filter & ter-urut.
-     * Method terpisah agar bisa diuji langsung pada test.
-     *
-     * @param  Collection<int, Expense>  $expenses
+     * Susun dokumen PDF laporan (kop, ringkasan, breakdown kategori, daftar transaksi)
+     * dari expense ter-filter & ter-urut; method terpisah agar bisa diuji langsung.
      */
     public function buildPdfDocument(Collection $expenses): \Barryvdh\DomPDF\PDF
     {
@@ -442,13 +398,7 @@ class Laporan extends Page implements HasTable
         return "laporan-pengeluaran-{$suffix}.{$extension}";
     }
 
-    /**
-     * Ringkasan angka (total, jumlah, rata-rata) dari kumpulan expense hasil
-     * filter — dipakai oleh PDF dan bisa diuji langsung.
-     *
-     * @param  Collection<int, Expense>  $expenses
-     * @return array{total: float, count: int, average: float}
-     */
+    /** Ringkasan angka (total, jumlah, rata-rata) expense hasil filter; dipakai PDF & bisa diuji langsung. */
     private function summarize(Collection $expenses): array
     {
         $total = (float) $expenses->sum('amount');
@@ -461,13 +411,7 @@ class Laporan extends Page implements HasTable
         ];
     }
 
-    /**
-     * Breakdown pengeluaran per kategori (nama, warna, jumlah transaksi,
-     * total) untuk tabel breakdown di PDF.
-     *
-     * @param  Collection<int, Expense>  $expenses
-     * @return BaseCollection<int, array{name: string, color: string, count: int, total: float}>
-     */
+    /** Breakdown pengeluaran per kategori (nama, warna, jumlah, total) untuk tabel breakdown di PDF. */
     private function categoryBreakdown(Collection $expenses): BaseCollection
     {
         return $expenses
@@ -482,13 +426,7 @@ class Laporan extends Page implements HasTable
             ->values();
     }
 
-    /**
-     * Kategori yang bisa dipilih pada filter: kategori default sistem
-     * (user_id NULL) ditambah kategori milik user yang sedang login — pola
-     * yang sama dengan pemakaian kategori di seluruh panel.
-     *
-     * @return array<int, string>
-     */
+    /** Opsi kategori filter: default sistem (user_id NULL) + milik user login — pola sama dengan seluruh panel. */
     private function categoryOptions(): array
     {
         return Category::query()
@@ -502,12 +440,7 @@ class Laporan extends Page implements HasTable
             ->all();
     }
 
-    /**
-     * Opsi tahun untuk mode "Bulan Tertentu": lima tahun terakhir s/d tahun
-     * depan, dibangkitkan dinamis agar template tetap relevan bertahun-tahun.
-     *
-     * @return array<int, int>
-     */
+    /** Opsi tahun "Bulan Tertentu": 5 tahun ke belakang s/d tahun depan, dibangkitkan dinamis. */
     private function yearOptions(): array
     {
         $years = range(

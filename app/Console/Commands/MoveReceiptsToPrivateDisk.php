@@ -8,16 +8,8 @@ use Illuminate\Support\Facades\Storage;
 use Throwable;
 
 /**
- * Pindahkan foto struk dari disk lama (public → storage/app/public/receipts)
- * ke disk privat baru 'receipts' (storage/app/private/receipts) — bagian dari
- * perbaikan temuan audit keamanan #2.
- *
- * Aman dijalankan berulang (idempotent): file yang sudah ada di disk baru
- * dilewati. Urutan per file SENGAJA copy → verifikasi ukuran → hapus file
- * lama, sehingga data lama tidak pernah hilang sebelum salinannya
- * terverifikasi utuh.
- *
- * Jalankan: php artisan receipts:move-to-private-disk [--dry-run]
+ * Pindahkan foto struk dari disk public ke disk privat 'receipts' (audit keamanan #2).
+ * Idempotent; tiap file di-copy → verifikasi ukuran → baru dihapus agar data lama aman.
  */
 class MoveReceiptsToPrivateDisk extends Command
 {

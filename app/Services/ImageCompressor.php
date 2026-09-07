@@ -6,11 +6,8 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Mengompres dan memperkecil gambar struk secara in-place memakai GD bawaan PHP
- * (tanpa dependency tambahan). Struk hanya berisi teks sehingga resolusi lebar
- * 1000px sudah lebih dari cukup untuk dibaca Tesseract, namun ukuran file-nya
- * jauh lebih kecil dari foto asli dari kamera.
- *
+ * Kompres & perkecil gambar struk in-place memakai GD bawaan PHP (tanpa dependency).
+ * Lebar 1000px sudah cukup untuk teks struk terbaca Tesseract, ukuran file jauh lebih kecil.
  * Dipanggil sebelum OCR/AI parsing pada alur Create/Edit expense.
  */
 class ImageCompressor
@@ -22,15 +19,9 @@ class ImageCompressor
     public const DEFAULT_QUALITY = 75;
 
     /**
-     * Resize (bila lebih lebar dari $maxWidth) lalu tulis ulang file yang sama
-     * ke storage dengan kualitas lebih rendah. Ekstensi/format file dipertahankan.
-     *
-     * - JPEG  -> imagejpeg(dengan quality $quality)
-     * - PNG   -> imagepng(dengan kompresi maksimal, lossless)
-     * - WEBP  -> imagewebp(dengan quality $quality)
-     * Format lain (mis. BMP/GIF) dilewati karena umumnya bukan untuk struk.
-     *
-     * @return bool true jika berhasil diproses, false jika gagal/gambar tidak layak.
+     * Resize (bila lebih lebar dari $maxWidth) lalu tulis ulang file yang sama dengan
+     * kualitas lebih rendah; JPEG/PNG/WEBP dipertahankan, format lain dilewati.
+     * Mengembalikan false bila gagal diproses atau gambar tidak layak.
      */
     public function compressReceipt(string $path, int $maxWidth = self::DEFAULT_MAX_WIDTH, int $quality = self::DEFAULT_QUALITY): bool
     {

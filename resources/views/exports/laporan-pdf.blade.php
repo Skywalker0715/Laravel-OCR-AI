@@ -19,8 +19,6 @@
               kanan melewati tepi halaman. Pakai sel spacer ber-lebar persen
               (lihat .summary). */
         @page {
-            /* Margin halaman yang lega agar tabel/kartu tidak mepet ke tepi:
-               atas 15mm, kiri-kanan 12mm, bawah 18mm (ruang ekstra untuk footer). */
             margin: 15mm 12mm 18mm;
         }
 

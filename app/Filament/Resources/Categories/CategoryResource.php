@@ -52,24 +52,13 @@ class CategoryResource extends Resource
 
     protected static ?string $recordTitleAttribute = 'name';
 
-    /**
-     * Atribut yang dicari oleh Global Search (search bar di atas panel).
-     * Kategori dicocokkan lewat namanya.
-     *
-     * @return array<string>
-     */
+    /** Global Search mencocokkan kategori lewat namanya. */
     public static function getGloballySearchableAttributes(): array
     {
         return ['name'];
     }
 
-    /**
-     * Info tambahan pada tiap hasil Global Search Kategori: berapa banyak
-     * transaksi yang memakai kategori ini. Memakai expenses_count bila
-     * tersedia (hasil withCount) agar tidak memicu query tambahan.
-     *
-     * @return array<string, string>
-     */
+    /** Detail Global Search: jumlah transaksi; pakai expenses_count (withCount) bila tersedia agar hemat query. */
     public static function getGlobalSearchResultDetails(Model $record): array
     {
         return [
@@ -77,15 +66,8 @@ class CategoryResource extends Resource
         ];
     }
 
-    /**
-     * Pasangan [ikon Heroicon, label] pilihan ikon untuk kategori pengeluaran.
-     * Mencakup kebutuhan rumah tangga (listrik, air, gas, internet, pulsa,
-     * iuran RT, dst) maupun usaha/UMKM (toko, pajak, keuangan, dll).
-     *
-     * Disimpan sebagai konstanta agar pasangan enum → teks mudah dirawat dan
-     * tidak tercampur dengan format HTML pada dropdown Select. HANYA gunakan
-     * nama case yang benar-benar ada di enum Filament\Support\Icons\Heroicon —
-     * nama yang salah (typo) membuat ikon tidak dirender (kosong) di UI.
+    /** Pilihan [ikon Heroicon, label] kategori, termasuk kebutuhan UMKM; nama case
+     * wajib valid di enum Heroicon — typo membuat ikon tidak dirender.
      *
      * @var array<int, array{0: Heroicon, 1: string}>
      */
@@ -122,20 +104,7 @@ class CategoryResource extends Resource
         [Heroicon::OutlinedCake, 'Pesta & Ulang Tahun'],
     ];
 
-    /**
-     * Opsi untuk Select ikon kategori.
-     *
-     * Kunci berupa value dari enum Heroicon (contoh "o-shopping-cart") karena
-     * nilai itulah yang tersimpan di kolom `categories.icon`. PHP tidak
-     * mengizinkan instance enum dipakai sebagai kunci array, jadi value-nya
-     * yang diekspose ke komponen Select — kunci & nilai SELALU string, bukan
-     * instance enum, sehingga render maupun penyimpanan bebas error tipe data.
-     *
-     * Nilai (label) berupa pratinjau SVG ikon + nama kategori; pratinjau
-     * dirender oleh Select karena field ikon memakai ->allowHtml().
-     *
-     * @return array<string, string>
-     */
+    /** Opsi Select ikon: kunci = value Heroicon (kolom `categories.icon`), nilai = pratinjau SVG + label (allowHtml). */
     public static function iconOptions(): array
     {
         $options = [];
@@ -229,12 +198,8 @@ class CategoryResource extends Resource
             // dilihat detailnya (View), diedit, dan dihapus langsung dari
             // halaman list.
             ->defaultSort('name')
-            // Kategori default sistem (user_id NULL) dipakai bersama semua
-            // user — READ-ONLY: tombol Edit/Delete disembunyikan dari tabel.
-            // Guard kerasnya ada di getEditAuthorizationResponse() /
-            // getDeleteAuthorizationResponse() di bawah file ini, yang juga
-            // menolak akses URL langsung ke halaman Edit serta memfilter
-            // bulk delete per-record (lihat authorizeIndividualRecords()).
+            // Kategori default sistem (user_id NULL) read-only: tombol Edit/Delete
+            // disembunyikan; guard keras di getEdit/DeleteAuthorizationResponse().
             ->recordActions([
                 ViewAction::make(),
                 EditAction::make()
@@ -256,25 +221,14 @@ class CategoryResource extends Resource
     }
 
     /**
-     * Infolist read-only untuk halaman View (Detail) Category, mengikuti gaya
-     * visual infolist ExpenseResource (Section ber-icon warna success, grid 2
-     * kolom, nominal besar & tebal berwarna hijau #10B981).
-     *
-     * Seluruh statistik (total, jumlah transaksi, transaksi terakhir, budget)
-     * dihitung KHUSUS milik user yang sedang login — kategori default sistem
-     * dipakai lintas user, jadi tanpa pembatasan ini angka akan tercampur.
+     * Infolist halaman View. Statistik dihitung khusus user yang login — kategori
+     * default dipakai lintas user, tanpa pembatasan ini angka akan tercampur.
      */
     public static function infolist(Schema $schema): Schema
     {
         return $schema
-            // Grid responsif pada objek Schema (pola sama dengan ExpenseResource):
-            //   Baris 1 : "Informasi Kategori" + "Ringkasan Pengeluaran" (berdampingan)
-            //   Baris 2 : "5 Transaksi Terakhir" + "Budget Aktif" (lebar penuh)
-            //
-            // Responsif: 1 kolom di mobile (<768px), 2 kolom baru mulai md agar
-            // section ringkasan tidak dipaksa berdampingan di layar sempit.
-            // Ditulis eksplisit (bukan integer) supaya breakpoint jelas — di
-            // Filament, ->columns(2) bermakna ['lg' => 2] (2 kolom baru >=1024px).
+            // Grid responsif: 1 kolom di mobile, 2 kolom mulai breakpoint md
+            // (Filament ->columns(2) berarti ['lg' => 2], baru efektif >=1024px).
             ->columns(['default' => 1, 'md' => 2])
             ->components([
                 Section::make('Informasi Kategori')
@@ -395,19 +349,9 @@ class CategoryResource extends Resource
     }
 
     /**
-     * Guard kategori default sistem (user_id NULL): read-only untuk SEMUA
-     * user. Kedua method ini adalah satu-satunya titik yang perlu
-     * di-override karena seluruh jalur otorisasi Filament v4 melewatinya:
-     *  - visibility tombol Edit/Delete — baik record action di tabel maupun
-     *    header action di halaman View/Edit — via
-     *    Page::getDefaultActionAuthorizationResponse();
-     *  - hard-check halaman Edit via EditRecord::authorizeAccess()
-     *    (abort 403 untuk akses URL langsung ke kategori default);
-     *  - bulk delete per-record untuk DeleteBulkAction yang memakai
-     *    authorizeIndividualRecords() (lihat table() di atas).
-     *
-     * Kategori milik user tetap mengikuti otorisasi default parent
-     * (policy bila ada; tanpa policy = diizinkan).
+     * Kategori default sistem (user_id NULL) read-only untuk semua user; kedua
+     * method ini adalah satu-satunya titik otorisasi Filament v4 yang perlu
+     * di-override (visibility action, hard-check halaman Edit, dan bulk delete).
      */
     public static function getEditAuthorizationResponse(Model $record): Response
     {

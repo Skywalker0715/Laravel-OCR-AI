@@ -7,13 +7,8 @@ use Filament\Widgets\ChartWidget;
 use Illuminate\Support\Carbon;
 
 /**
- * Grafik garis riwayat pengeluaran per hari, dihitung dari SELURUH expense
- * milik user yang sedang login berdasarkan date_shopping (tanggal belanja
- * asli pada struk).
- *
- * Tidak ada pembatasan periode — seluruh riwayat historis tetap muncul di
- * grafik. Analisis ber-filter (rentang tanggal/bulan) tersedia di halaman
- * Laporan.
+ * Grafik garis pengeluaran per tanggal belanja (date_shopping), seluruh riwayat.
+ * Analisis ber-filter tersedia di halaman Laporan.
  */
 class ExpenseLineChart extends ChartWidget
 {

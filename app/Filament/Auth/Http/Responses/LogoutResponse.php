@@ -9,11 +9,7 @@ use Illuminate\Http\RedirectResponse;
 use Livewire\Features\SupportRedirects\Redirector;
 
 /**
- * Response logout kustom yang menambahkan notifikasi
- * "Anda berhasil keluar" sebelum mengarahkan ulang ke halaman login.
- *
- * Terdaftar sebagai implementasi default dari kontrak
- * Filament\Auth\Http\Responses\Contracts\LogoutResponse.
+ * Response logout kustom: kirim notifikasi "berhasil keluar", lalu redirect ke login.
  */
 class LogoutResponse implements LogoutResponseContract
 {

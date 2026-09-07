@@ -7,20 +7,8 @@ use App\Models\Expense;
 use Illuminate\Console\Command;
 
 /**
- * Proses ulang parsing OCR + AI untuk expense yang sempat gagal / masih kosong.
- *
- * Latar belakang: sebuah expense bisa tertinggal kosong (vendor, date,
- * amount, change NULL) padahal foto struk & teks OCR (note) sudah ada — mis.
- * job AIParserJob tidak sempat berjalan karena queue worker tidak aktif, atau
- * parsing memproduksi data kosong pada versi kode sebelumnya. Command ini
- * menjalankan ulang pipeline parsing (tanpa perlu mengunggah ulang foto)
- * memakai teks yang sudah ada di kolom `note`; bila `note` kosong, dicoba
- * OCR ulang dari foto struk yang tersimpan.
- *
- * Pemakaian:
- *   php artisan expenses:reprocess                # semua expense yang amount-nya kosong
- *   php artisan expenses:reprocess 7              # hanya expense dengan id 7
- *   php artisan expenses:reprocess --all          # paksa proses semua expense
+ * Proses ulang parsing dari `note` (atau OCR ulang dari foto bila note kosong)
+ * untuk expense yang masih kosong / gagal dicatat.
  */
 class ReprocessExpense extends Command
 {

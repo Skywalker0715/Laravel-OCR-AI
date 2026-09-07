@@ -157,11 +157,6 @@
     ])
 
     <div class="fi-simple-layout">
-        {{-- Layer dekorasi: satu container fixed yang memuat semua SVG di
-             bawah ini. Posisinya di belakang card form (z-index: -1), tidak
-             bisa diklik (pointer-events: none), dan dipotong di tepi viewport
-             (overflow: hidden) — semuanya diatur via CSS .cb-decor di atas.
-             aria-hidden agar tidak dibaca screen reader. --}}
         <div class="cb-decor" aria-hidden="true">
             {{-- Blob hijau sangat samar — pojok kiri-atas viewport --}}
             <svg class="cb-decor-blob cb-decor-blob-top" width="640" height="640" viewBox="0 0 640 640">

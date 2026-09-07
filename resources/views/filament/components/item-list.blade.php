@@ -1,8 +1,3 @@
-{{-- Detail item struk (vendor, tanggal, total, tabel item). CATATAN DARK
-     MODE: utility Tailwind pada view ini tidak dijamin ter-compile ke tema
-     bawaan Filament, jadi semua warna memakai design token var(--cb-...)
-     (didefinisikan + di-override html.dark di AdminPanelProvider) agar
-     komponen ikut berubah warna saat toggle dark mode dipakai. --}}
 <div style="padding: 1.5rem;">
     <h2 style="font-size: 1.25rem; line-height: 1.75rem; font-weight: 700; color: var(--cb-strong); margin-bottom: 1rem;">
         Detail Item - {{ $expense->title }}

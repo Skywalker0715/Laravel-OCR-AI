@@ -12,11 +12,8 @@ use Maatwebsite\Excel\Concerns\WithMapping;
 use Maatwebsite\Excel\Concerns\WithTitle;
 
 /**
- * Export daftar expense hasil filter halaman Laporan ke file .xlsx.
- *
- * Query diterima JADI (sudah ter-filter & ter-urut) dari halaman Laporan
- * (lihat Laporan::orderedExportQuery()), sehingga isi file selalu persis
- * sama dengan tabel yang sedang terlihat oleh user di layar.
+ * Export daftar expense dari query yang sudah ter-filter & ter-urut
+ * (Laporan::orderedExportQuery()) agar isi .xlsx sama dengan tabel di layar.
  */
 class LaporanExpenseExport implements FromQuery, ShouldAutoSize, WithColumnFormatting, WithHeadings, WithMapping, WithTitle
 {
@@ -40,13 +37,7 @@ class LaporanExpenseExport implements FromQuery, ShouldAutoSize, WithColumnForma
         return ['Judul', 'Vendor', 'Tanggal', 'Kategori', 'Jumlah'];
     }
 
-    /**
-     * Baris data untuk satu expense; kolom Jumlah tetap numerik (float) agar
-     * bisa dihitung/NUMBER-formatted oleh Excel, bukan string Rupiah.
-     *
-     * @param  Expense  $expense
-     * @return array<int, mixed>
-     */
+    /** Kolom Jumlah tetap numerik (float) agar bisa dihitung/diformat oleh Excel, bukan string Rupiah. */
     public function map($expense): array
     {
         return [
@@ -58,12 +49,7 @@ class LaporanExpenseExport implements FromQuery, ShouldAutoSize, WithColumnForma
         ];
     }
 
-    /**
-     * Format kolom Jumlah (E) dengan pemisah ribuan (tanpa desimal) supaya
-     * rapi dibaca, tanpa mengubah nilai numeriknya.
-     *
-     * @return array<string, string>
-     */
+    /** Format kolom Jumlah (E): pemisah ribuan tanpa desimal, tanpa mengubah nilai numeriknya. */
     public function columnFormats(): array
     {
         return [

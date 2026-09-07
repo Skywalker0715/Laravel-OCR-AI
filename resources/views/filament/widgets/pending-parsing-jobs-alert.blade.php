@@ -5,10 +5,6 @@
         :heading="$heading"
         :description="$description"
     >
-        {{-- Warna teks memakai design token var(--cb-muted) (bukan class
-             Tailwind `text-gray-600 dark:text-gray-400`) karena utility
-             Tailwind tidak dijamin ter-compile; token ini otomatis berubah
-             warna mengikuti dark mode (lihat AdminPanelProvider). --}}
         <p style="font-size: 0.875rem; line-height: 1.25rem; color: var(--cb-muted);">
             {{ $message }}
         </p>

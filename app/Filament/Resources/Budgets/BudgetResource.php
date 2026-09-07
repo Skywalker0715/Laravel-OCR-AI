@@ -30,16 +30,7 @@ class BudgetResource extends Resource
 
     protected static ?int $navigationSort = 3;
 
-    /**
-     * Atribut yang dicari oleh Global Search (search bar di atas panel).
-     *
-     * Budget tidak punya kolom judul sendiri, jadi pencarian dilakukan pada
-     * nama kategori terkait. Notasi titik ("category.name") otomatis
-     * diterjemahkan Filament menjadi whereHas('category') sehingga hasilnya
-     * hanya budget yang kategorinya cocok dengan kata kunci.
-     *
-     * @return array<string>
-     */
+    /** Global Search via nama kategori (notasi "category.name" → whereHas); Budget tak punya kolom judul sendiri. */
     public static function getGloballySearchableAttributes(): array
     {
         return ['category.name'];
@@ -59,11 +50,8 @@ class BudgetResource extends Resource
     }
 
     /**
-     * Detail tambahan pada tiap hasil Global Search Budget: periode berlaku
-     * dan nominal batas anggaran. Kategori sudah eager-load lewat
-     * getEloquentQuery() sehingga judul di atas tidak memicu N+1 query.
-     *
-     * @return array<string, string>
+     * Detail hasil Global Search: periode & batas anggaran. Kategori sudah
+     * eager-load di getEloquentQuery(), jadi ini tidak memicu N+1 query.
      */
     public static function getGlobalSearchResultDetails(Model $record): array
     {
@@ -76,11 +64,8 @@ class BudgetResource extends Resource
     }
 
     /**
-     * Budget tidak punya kolom judul sendiri (seperti `title` pada Expense),
-     * jadi `$recordTitleAttribute` tidak dipakai. Method ini dioverride untuk
-     * tetap mengaktifkan "record title" agar judul & breadcrumb halaman Edit
-     * informatif — konsisten dengan resource Expenses yang menampilkan judul
-     * belanja di breadcrumb.
+     * Override record title: Budget tak punya kolom judul, jadi judul & breadcrumb
+     * dibangun dari kombinasi kategori + periode.
      */
     public static function hasRecordTitle(): bool
     {
@@ -88,10 +73,8 @@ class BudgetResource extends Resource
     }
 
     /**
-     * Judul record Budget, mis. "Anggaran Makanan & Minuman — Januari 2026".
-     * Dipakai pada judul & breadcrumb halaman Edit serta label aksi record di
-     * tabel. Budget tanpa kategori (anggaran umum) ditampilkan sebagai
-     * "Semua Kategori".
+     * Judul record, mis. "Anggaran Makanan & Minuman — Januari 2026"; budget umum
+     * ditampilkan sebagai "Semua Kategori".
      */
     public static function getRecordTitle(?Model $record): string|Htmlable|null
     {
@@ -106,10 +89,7 @@ class BudgetResource extends Resource
     }
 
     /**
-     * Query dasar seluruh halaman resource (list, create, edit, delete).
-     *
-     * Isolasi per-user ditangani oleh global scope OwnedByUserScope pada
-     * model Budget. Eager load 'category' agar kolom kategori di tabel
+     * Query dasar resource; eager-load 'category' agar kolom kategori di tabel
      * tidak memicu N+1 query saat daftar anggaran dirender.
      */
     public static function getEloquentQuery(): Builder

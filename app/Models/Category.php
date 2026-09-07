@@ -9,11 +9,8 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 
 /**
- * Kategori belanja untuk mengklasifikasikan pengeluaran.
- *
- * Sebuah kategori bisa dimiliki oleh seorang user tertentu (user_id terisi)
- * atau menjadi kategori default yang berlaku sistem (user_id NULL). Semua
- * user dapat melihat kategori default + kategori milik dirinya sendiri.
+ * Kategori belanja; bisa milik user tertentu (user_id terisi) atau default sistem
+ * (user_id NULL). Semua user melihat kategori default + kategori miliknya sendiri.
  */
 class Category extends Model
 {
@@ -32,13 +29,8 @@ class Category extends Model
     ];
 
     /**
-     * Kata kunci sinonim → nama kategori kanonik.
-     *
-     * Dipakai untuk menebak kategori dari label yang dikembalikan AI ataupun
-     * dari teks mentah struktur (fallback parser). Semua alias dicocokkan
-     * secara tidak peka huruf (substring), jadi kalimat seperti "Minuman
-     * Kemasan" akan jatuh ke kategori "Makanan & Minuman".
-     *
+     * Sinonim → nama kategori kanonik untuk menebak kategori dari label AI atau teks
+     * struk (fallback parser); dicocokkan case-insensitive sebagai substring.
      * @var array<string, array<int, string>>
      */
     private const CATEGORY_SYNONYMS = [
@@ -82,14 +74,9 @@ class Category extends Model
     protected static function booted(): void
     {
         static::creating(function (Category $category): void {
-            // Guard anti-spoofing TANPA merusak semantik kategori default:
-            // user_id NULL adalah nilai yang disengaja (kategori default
-            // sistem dipakai lintas user), jadi tidak boleh diisi paksa dari
-            // Auth. Yang dipaksa hanya KETIDAKCOCOKAN — di konteks
-            // terautentikasi, user_id milik user lain selalu ditimpa dengan
-            // user yang sedang login. Aman untuk queue sync (AIParserJob →
-            // findOrCreateByName()): user_id di-set eksplisit di sana dan
-            // selalu milik pemilik expense (atau tetap NULL untuk default).
+            // Guard anti-spoofing tanpa merusak kategori default: user_id NULL disengaja
+            // (dipakai lintas user) dan tidak diisi paksa dari Auth — hanya user_id milik
+            // user lain yang ditimpa. Aman untuk queue sync (user_id di-set eksplisit).
             if (Auth::check()
                 && $category->user_id !== null
                 && (int) $category->user_id !== (int) Auth::id()) {
@@ -99,11 +86,9 @@ class Category extends Model
     }
 
     /**
-     * Tebak nama kategori kanonik dari sebuah label/teks.
-     *
-     * Fungsi murni (tidak menyentuh database) sehingga aman dipakai oleh
-     * AIParserService untuk dua jalur sekaligus: hasil AI maupun fallback
-     * regex. Jika tidak ada kata kunci yang cocok, dikembalikan "Lainnya".
+     * Tebak nama kategori kanonik dari sebuah label/teks. Fungsi murni (tanpa DB),
+     * aman dipakai AIParserService untuk jalur AI maupun fallback regex;
+     * tanpa kecocokan mengembalikan "Lainnya".
      */
     public static function inferCategoryName(?string $text): string
     {
@@ -125,11 +110,8 @@ class Category extends Model
     }
 
     /**
-     * Resolusi label kategori → instance kategori nyata di database.
-     *
-     * Dua langkah: (1) cocokkan label ke nama kanonik via inferCategoryName(),
-     * (2) cari kategori tersebut lalu buat baru bila belum ada. return null
-     * terjadi ketika record kategori gagal dibuat (jarang).
+     * Resolusi label kategori → instance kategori nyata di database: cocokkan ke nama
+     * kanonik via inferCategoryName(), lalu findOrCreateByName(). NULL bila gagal dibuat.
      */
     public static function resolveFromLabel(?string $label, ?int $userId): ?self
     {
@@ -139,14 +121,9 @@ class Category extends Model
     }
 
     /**
-     * Cari kategori berdasarkan nama; buat baru bila belum ada.
-     *
-     * Urutan pencarian:
-     * 1. Kategori default sistem (user_id NULL) — berlaku lintas user dan
-     *    lebih diutamakan agar semua user memakai instance kategori sama.
-     * 2. Kategori milik user tersebut (user_id = $userId).
-     * 3. Buat baru: sebagai default sistem untuk nama yang terdaftar di
-     *    DEFAULT_CATEGORIES, atau milik user untuk nama di luar daftar.
+     * Cari kategori berdasarkan nama; buat baru bila belum ada. Urutan: default sistem
+     * (user_id NULL) didahulukan agar semua user memakai instance sama, lalu milik user,
+     * lalu buat baru (default sistem bila nama terdaftar di DEFAULT_CATEGORIES).
      */
     public static function findOrCreateByName(string $name, ?int $userId): ?self
     {
@@ -211,14 +188,9 @@ class Category extends Model
     }
 
     /**
-     * Total nominal (SUM amount) seluruh expense milik $userId yang memakai
-     * kategori ini.
-     *
-     * Query dibatasi eksplisit ke user tersebut (di atas global scope
-     * OwnedByUserScope pada Expense) karena kategori default sistem dipakai
-     * lintas user — tanpa ini total akan mencampur pengeluaran user lain.
-     * Expense yang parsing-nya gagal total (amount NULL) tidak ikut
-     * dijumlahkan, konsisten dengan perhitungan Budget::spentAmount().
+     * Total nominal (SUM amount) expense milik $userId pada kategori ini. where('user_id')
+     * eksplisit karena kategori default dipakai lintas user; amount NULL (parsing gagal)
+     * tidak dijumlahkan — konsisten dengan Budget::spentAmount().
      */
     public function totalExpenseAmountForUser(?int $userId): float
     {
@@ -233,12 +205,9 @@ class Category extends Model
     }
 
     /**
-     * Jumlah transaksi (expense) milik $userId yang memakai kategori ini.
-     *
-     * Sengaja dipisahkan dari kolom "Jumlah Transaksi" di tabel list (yang
-     * menghitung lintas user karena kategori default dipakai bersama): pada
-     * halaman View angka ini harus konsisten dengan Total Pengeluaran yang
-     * berada di Section yang sama, yaitu khusus milik user yang login.
+     * Jumlah transaksi milik $userId pada kategori ini — dibedakan dari kolom
+     * "Jumlah Transaksi" di tabel list (yang menghitung lintas user) agar konsisten
+     * dengan Total Pengeluaran pada halaman View.
      */
     public function expenseCountForUser(?int $userId): int
     {
@@ -252,13 +221,9 @@ class Category extends Model
     }
 
     /**
-     * $limit transaksi terakhir milik $userId yang memakai kategori ini,
-     * diurutkan dari yang paling baru dicatat (created_at).
-     *
-     * Pengurutan sengaja TIDAK memakai date_shopping karena tanggal belanja
-     * bisa NULL (struk yang parsing-nya belum selesai) dan perilaku
-     * NULLS FIRST/LAST berbeda antara PostgreSQL dan MySQL — `latest()`
-     * dijamin aman di semua driver database.
+     * $limit transaksi terakhir milik $userId pada kategori ini (urut created_at).
+     * Sengaja bukan date_shopping: bisa NULL dan perilaku NULLS FIRST/LAST beda
+     * antar driver DB — latest() aman di semua driver.
      */
     public function recentExpensesForUser(?int $userId, int $limit = 5): Collection
     {
@@ -274,18 +239,9 @@ class Category extends Model
     }
 
     /**
-     * Budget TERBARU kategori ini untuk $userId, apa pun periodenya.
-     *
-     * Sengaja TIDAK dibatasi ke bulan berjalan — kategori mungkin punya
-     * budget di periode lampau (mis. Mei 2025) dan sudah tidak ada di
-     * periode sekarang; section "Budget" di halaman View Category tetap
-     * harus menampilkannya. Query diurutkan year DESC lalu month DESC dan
-     * mengambil 1 baris teratas.
-     *
-     * Global scope OwnedByUserScope pada model Budget sudah membatasi query
-     * ke budget milik user yang login; kondisi user_id eksplisit ditambahkan
-     * sebagai safety net yang self-documenting (pola sama dengan
-     * Budget::spentAmount()).
+     * Budget terbaru kategori ini untuk $userId, apa pun periodenya — tidak dibatasi
+     * bulan berjalan agar budget periode lampau tetap tampil; urut year DESC, month
+     * DESC; where('user_id') eksplisit sebagai safety net di atas global scope.
      */
     public function latestBudgetForUser(?int $userId): ?Budget
     {

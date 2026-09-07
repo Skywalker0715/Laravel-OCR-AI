@@ -9,18 +9,8 @@ use Filament\Widgets\ChartWidget;
 use Filament\Widgets\Concerns\InteractsWithPageFilters;
 
 /**
- * Grafik bar pengeluaran per kategori untuk periode & kategori yang difilter
- * di halaman Laporan (bukan keseluruhan waktu seperti CategoryChart di
- * Dashboard).
- *
- * Filter diterima otomatis dari halaman melalui properti reaktif $pageFilters
- * (mekanisme resmi Filament v4); ChartWidget memanggil ulang getData() pada
- * setiap rendering, sehingga grafik selalu mengikuti filter terbaru.
- *
- * Query memakai GROUP BY category_id dengan ekspresi yang sama persis di
- * SELECT agar aman lintas database (PostgreSQL/MySQL/SQLite). Expense tanpa
- * kategori dikelompokkan ke "Tanpa Kategori"; warna tiap batang diambil dari
- * atribut warna kategori.
+ * Grafik bar pengeluaran per kategori untuk filter Laporan; $pageFilters reaktif
+ * membuat grafik dirender ulang mengikuti filter terbaru. Tanpa kategori → "Tanpa Kategori".
  */
 class LaporanCategoryChart extends ChartWidget
 {

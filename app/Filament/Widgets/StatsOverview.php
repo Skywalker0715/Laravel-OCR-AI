@@ -9,14 +9,8 @@ use Filament\Widgets\StatsOverviewWidget;
 use Filament\Widgets\StatsOverviewWidget\Stat;
 
 /**
- * Ringkasan statistik keuangan KESELURUHAN (semua waktu) untuk user yang
- * sedang login.
- *
- * Seluruh query memakai model Expense yang ter-scope per-user via
- * OwnedByUserScope, sehingga angka yang tampil selalu milik user tersebut.
- *
- * Catatan: filter periode (bulan/tahun/rentang) sengaja TIDAK dipakai di
- * Dashboard — analisis ber-filter tersedia di halaman Laporan.
+ * Ringkasan keuangan seluruh waktu per user (via OwnedByUserScope); analisis
+ * ber-filter tersedia di halaman Laporan.
  */
 class StatsOverview extends StatsOverviewWidget
 {

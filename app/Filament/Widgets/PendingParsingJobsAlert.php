@@ -7,14 +7,8 @@ use Filament\Widgets\Widget;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Peringatan di dashboard bila ada job parsing yang "menggantung" di tabel
- * `jobs` (indikasi queue worker tidak berjalan) atau job yang gagal total.
- *
- * Hanya aktif bila QUEUE_CONNECTION memakai tabel (bukan 'sync'): pada mode
- * 'sync' job diproses inline saat itu juga sehingga tidak pernah menumpuk.
- *
- * Kolom `jobs.created_at`, `available_at`, dan `reserved_at` disimpan sebagai
- * unix timestamp (angka detik), bukan object DateTime.
+ * Peringatan dashboard saat ada job parsing menggantung (>STALE_MINUTES) di tabel
+ * `jobs` atau gagal total. Nonaktif pada QUEUE_CONNECTION 'sync' (job inline).
  */
 class PendingParsingJobsAlert extends Widget
 {

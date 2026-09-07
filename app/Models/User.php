@@ -11,11 +11,8 @@ use Illuminate\Notifications\Notifiable;
 
 /**
  * User aplikasi (pemilik expense & akun login admin panel).
- *
- * Mengimplementasikan FilamentUser (kontrak wajib Filament) agar panel admin
- * tetap bisa diakses di lingkungan non-local: tanpa kontrak ini, middleware
- * Authenticate milik Filament memblokir SEMUA user dengan 403 kecuali di env
- * "local" (lihat Filament\Http\Middleware\Authenticate::authenticate()).
+ * Implements FilamentUser agar panel tetap bisa diakses di env non-local —
+ * tanpa kontrak ini middleware Filament memblokir semua user dengan 403.
  */
 class User extends Authenticatable implements FilamentUser
 {

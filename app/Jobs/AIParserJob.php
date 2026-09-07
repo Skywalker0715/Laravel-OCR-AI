@@ -30,14 +30,9 @@ class AIParserJob implements ShouldQueue
     public $backoff = [10, 30, 60];
 
     /**
-     * Batas nilai kolom uang setelah migration 2026_09_03_000001
-     * (widen_expense_money_columns):
-     *  - expense_items.qty / price / subtotal → decimal(14,2)
-     *  - expenses.change                      → decimal(14,2)
-     *  - expenses.amount                      → decimal(15,2) (tidak berubah)
-     * Nilai hasil parsing yang melewati batas ini di-NULL-kan oleh
-     * sanitizeMoneyForColumn(), bukan dibiarkan membuat query gagal
-     * SQLSTATE[22003] "numeric field overflow".
+     * Batas nilai kolom uang (migration widen_expense_money_columns: qty/price/subtotal
+     * decimal(14,2), change decimal(14,2), amount decimal(15,2)). Nilai di luar batas
+     * di-NULL-kan oleh sanitizeMoneyForColumn(), bukan membuat query gagal SQLSTATE[22003].
      */
     private const MAX_ITEM_MONEY = 99999999999999.99;
 
@@ -64,14 +59,9 @@ class AIParserJob implements ShouldQueue
         Log::info('AIParserJob finished for record id: '.$this->record->id.' → ok='.var_export($result['ok'], true));
     }
 
-    /**
-     * Proses ulang (parse + simpan) sebuah expense dari teks OCR di kolom `note`.
-     * Dipakai oleh job berantre (handle) maupun command `expenses:reprocess` /
-     * tombol "Proses Ulang" agar perilakunya selalu sama.
-     *
-     * Tujuannya: TIDAK PERNAH meninggalkan expense dalam keadaan kosong total
-     * secara diam-diam. Jika memang tidak ada data yang bisa diekstrak, tetap
-     * dikirim notifikasi danger ke pemilik expense dan status 'ok' false.
+    /** Proses ulang (parse + simpan) expense dari `note` — dipakai job queue, command
+     * expenses:reprocess, dan tombol "Proses Ulang" agar perilaku seragam; selalu
+     * mengirim notifikasi hasil (ok=false bila gagal) agar tidak gagal diam-diam.
      *
      * @return array{ok: bool, note: string}
      */
@@ -81,15 +71,8 @@ class AIParserJob implements ShouldQueue
 
         $this->helper = app(Helper::class);
 
-        // Pastikan ada teks untuk diparse. Bila belum ada (expense lama yang
-        // sempat gagal), coba OCR ulang dari foto struk yang sudah tersimpan —
-        // tanpa perlu user mengunggah foto dari awal.
-        //
-        // forceReocr dipaksakan tombol "Proses Ulang OCR & AI" di ViewExpense
-        // agar selalu memakai foto struk TERBARU dari kolom receipt_image,
-        // bukan teks OCR yang sudah kadaluarsa (stale note). Akibatnya sebelumnya:
-        // ganti foto lewat form Edit tidak mengubah vendor/total, karena parsing
-        // masih memakai `note` lama yang tidak pernah di-refresh.
+        // Pastikan ada teks untuk diparse: bila `note` kosong atau forceReocr,
+        // jalankan OCR ulang dari foto struk yang tersimpan.
         $note = (string) ($record->note ?? '');
         if (($forceReocr || trim($note) === '') && $record->receipt_image) {
             $note = $this->tryReocr($record);
@@ -133,13 +116,9 @@ class AIParserJob implements ShouldQueue
         $categoryLabel = $parsed['category'] ?? Category::inferCategoryName($vendor);
         $category = Category::resolveFromLabel($categoryLabel, $record->user_id);
 
-        // 3) Simpan di kesempatan pertama agar partial result tidak hilang.
-        // Nilai uang di-guard dulu terhadap batas kolom (lihat migration
-        // 2026_09_03_000001): angka tidak masuk akal hasil parsing — umumnya
-        // regex/AI salah menangkap nomor IDPEL/NPWP/no. HP/kode referensi
-        // sebagai nominal — di-NULL-kan + log warning, BUKAN dibiarkan membuat
-        // seluruh save() gagal. Sesuai strategi project: title & foto struk
-        // harus tetap tersimpan agar user bisa mengoreksi manual.
+        // 3) Simpan di kesempatan pertama agar partial result tidak hilang; nilai uang
+        // di-guard batas kolom (migration 2026_09_03_000001) — angka tak wajar hasil
+        // parsing di-NULL-kan + warning agar save() tetap sukses (title & foto tersimpan).
         $record->vendor = $vendor !== '' ? $vendor : null;
         $record->date_shopping = $date;
         $record->amount = $this->sanitizeMoneyForColumn(
@@ -195,12 +174,9 @@ class AIParserJob implements ShouldQueue
         // 5) Indikator kegagalan total: tidak ada nominal maupun info tersisa.
         $extractable = $amount > 0 || ($vendor !== null && $vendor !== '') || $date !== null || count($items) > 0;
 
-        // Notifikasi hasil parsing ke pemilik expense (lonceng Filament):
-        // sukses via AI, sukses via fallback regex, atau gagal total.
-        // Peringatan budget TIDAK dikirim dari sini — model event
-        // Expense::saved sudah memanggil BudgetAlertService setiap kali
-        // amount/kategori/tanggal belanja expense berubah, sehingga jalur
-        // manual (form Create/Edit) pun ikut terpantau.
+        // Notifikasi hasil parsing (sukses AI / fallback / gagal total). Peringatan
+        // budget tidak dikirim dari sini — Expense::saved memanggil BudgetAlertService,
+        // sehingga jalur manual (Create/Edit) pun ikut terpantau.
         $this->notifyParsingResult($record, $extractable);
 
         return [
@@ -267,17 +243,11 @@ class AIParserJob implements ShouldQueue
         return null;
     }
 
-    /**
-     * Guard nilai uang hasil parsing terhadap batas kolom numerik PostgreSQL.
+    /** Guard nilai uang terhadap batas kolom numerik PostgreSQL: angka di luar batas
+     * (biasanya regex/AI salah tangkap nomor IDPEL/NPWP/no. HP sebagai nominal)
+     * disimpan NULL + warning, bukan menggagalkan penyimpanan (SQLSTATE[22003]).
      *
-     * Angka di luar batas (hampir selalu regex/AI salah menangkap nomor
-     * identitas struk — IDPEL, NPWP, no. HP/WA, kode referensi — sebagai
-     * nominal rupiah) TIDAK boleh membuat seluruh penyimpanan gagal dengan
-     * SQLSTATE[22003] "numeric field overflow". Sesuai strategi project,
-     * nilai ekstrem disimpan sebagai NULL + log warning: title & foto struk
-     * tetap tersimpan dan user bisa mengoreksi manual.
-     *
-     * @return float|null Nilai yang aman disimpan, atau NULL bila di luar batas.
+     * @return float|null Nilai aman untuk disimpan, atau NULL bila di luar batas.
      */
     private function sanitizeMoneyForColumn(float $value, string $column, float $max, int $expenseId): ?float
     {
@@ -296,18 +266,9 @@ class AIParserJob implements ShouldQueue
         return $value;
     }
 
-    /**
-     * Notifikasi hasil parsing ke pemilik expense lewat lonceng Filament.
-     *
-     * Pesannya bergantung pada jalur & hasil parsing:
-     *  - Sukses via AI Cohere       → sukses (info).
-     *  - Sukses via fallback regex  → warning + tombol menuju halaman Edit
-     *    expense, karena hasil regex mungkin tidak lengkap/salah.
-     *  - Gagal total                → danger + tombol menuju halaman Edit,
-     *    agar user mengisi data struk secara manual.
-     *
-     * Notifikasi database dipakai (bukan toast) karena job berjalan dari
-     * worker queue — tidak ada request browser yang bisa menerima toast.
+    /** Notifikasi hasil parsing ke pemilik expense lewat lonceng Filament: sukses AI
+     * → success; sukses fallback regex → warning + tombol Edit; gagal total → danger
+     * + tombol Edit. Database notification (bukan toast) karena job berjalan di queue.
      */
     private function notifyParsingResult(Expense $record, bool $extractable): void
     {
@@ -365,11 +326,8 @@ class AIParserJob implements ShouldQueue
     }
 
     /**
-     * URL halaman Edit Expense untuk tombol aksi pada notifikasi.
-     *
-     * Dibungkus try-catch: bila route/route name resource berubah di masa
-     * depan, kegagalan membuat URL TIDAK boleh menggagalkan pengiriman
-     * notifikasinya — cukup tombolnya yang tidak muncul.
+     * URL halaman Edit Expense untuk tombol notifikasi. Dibungkus try-catch agar
+     * perubahan route di masa depan tidak menggagalkan pengiriman notifikasi.
      */
     private static function editExpenseUrl(Expense $record): ?string
     {

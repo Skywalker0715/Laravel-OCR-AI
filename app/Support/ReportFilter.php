@@ -9,20 +9,9 @@ use Illuminate\Support\Carbon;
 use Throwable;
 
 /**
- * Normalisasi & penerapan filter halaman Laporan.
- *
- * Kelas ini menjadi SATU sumber kebenaran untuk filter periode & kategori
- * yang dipakai bersama oleh halaman Laporan, widget ringkasan, widget
- * grafik, serta export PDF/Excel — sehingga semua bagian dijamin selalu
- * menampilkan angka yang konsisten untuk filter yang sama.
- *
- * Struktur array $filters (state form "filtersForm" di halaman Laporan):
- *   - period_mode  : 'range' (rentang tanggal) | 'month' (bulan + tahun)
- *   - date_from    : ?string Y-m-d   (mode range)
- *   - date_until   : ?string Y-m-d   (mode range)
- *   - month        : ?int 1-12       (mode month)
- *   - year         : ?int            (mode month)
- *   - category_ids : ?array<int>     (opsional; kosong = semua kategori)
+ * Satu sumber kebenaran filter periode & kategori halaman Laporan — dipakai bersama
+ * oleh halaman, widget ringkasan/grafik, dan export PDF/Excel agar angkanya konsisten.
+ * Struktur $filters = state form filtersForm Laporan (period_mode, date_from/until, month, year, category_ids).
  */
 class ReportFilter
 {
@@ -51,10 +40,7 @@ class ReportFilter
     }
 
     /**
-     * Batas periode hasil filter: [dari, sampai] sebagai CarbonImmutable
-     * (dari = 00:00:00, sampai = 23:59:59). Nilai null berarti tidak ada
-     * batas di sisi tersebut (semua waktu). Mode 'month' selalu menghasilkan
-     * kedua batas terisi.
+     * Batas periode [dari 00:00, sampai 23:59]; null = tanpa batas di sisi itu.
      *
      * @return array{0: ?CarbonImmutable, 1: ?CarbonImmutable}
      */
@@ -107,12 +93,7 @@ class ReportFilter
         return 'Semua periode';
     }
 
-    /**
-     * ID kategori terpilih yang sudah dinormalisasi (int, unik). Array kosong
-     * berarti tanpa filter kategori (semua kategori ikut dihitung).
-     *
-     * @return array<int, int>
-     */
+    /** ID kategori terpilih (int, unik); kosong = tanpa filter kategori. */
     public function categoryIds(): array
     {
         return collect($this->filters['category_ids'] ?? [])
@@ -124,11 +105,9 @@ class ReportFilter
     }
 
     /**
-     * Terapkan kondisi periode & kategori ini ke query Expense.
-     *
-     * Kepemilikan data (user_id) TIDAK diurus di sini — itu tugas global scope
-     * OwnedByUserScope pada model Expense. Kolom di-qualify agar tetap aman
-     * bila query pemanggil memakai join.
+     * Terapkan kondisi periode & kategori ke query. Kepemilikan (user_id) tidak
+     * diurus di sini — tugas global scope OwnedByUserScope; kolom di-qualify agar
+     * aman bila query pemanggil memakai join.
      */
     public function apply(Builder $query): Builder
     {

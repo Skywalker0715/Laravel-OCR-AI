@@ -5,11 +5,7 @@ namespace App\Filament\Pages;
 use Filament\Pages\Dashboard as BaseDashboard;
 
 /**
- * Dashboard admin yang menampilkan widget statistik & grafik.
- *
- * Meng-extend Dashboard bawaan Filament, lalu mengganti daftar widget agar
- * hanya widget milik aplikasi ini yang dirender (Widget "Welcome" bawaan
- * sengaja dihapus).
+ * Dashboard admin: memakai widget kustom aplikasi (Widget "Welcome" bawaan dihapus).
  */
 class Dashboard extends BaseDashboard
 {

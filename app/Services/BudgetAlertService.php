@@ -11,23 +11,9 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Pemantau pemakaian budget + pengirim notifikasi peringatan budget.
- *
- * Dipanggil setiap kali sebuah expense disimpan/diupdate (lihat model event
- * pada App\Models\Expense) maupun setelah parsing struk mengisi amount.
- * Untuk setiap budget yang relevan dengan expense tersebut (budget khusus
- * kategori + budget umum pada periode yang sama), total pemakaian dihitung
- * ulang lalu dua ambang batas diperiksa:
- *
- *  - >= 90% limit  → warning "Budget [kategori] sudah terpakai 90%+"
- *  - >= 100% limit → danger  "Budget [kategori] sudah terlampaui"
- *
- * Setiap ambang hanya dikirim SEKALI per budget per periode (bulan+tahun).
- * State-nya disimpan sebagai kolom timestamp di tabel budgets (notified_90_at
- * / notified_100_at, migration 2026_09_04_000001) — bukan di memori — sehingga
- * aman terhadap restart worker queue maupun request paralel. Klaim flag
- * dilakukan secara atomik (UPDATE ... WHERE flag IS NULL) sehingga dua save
- * beruntun tidak mungkin sama-sama mengirim notifikasi yang sama.
+ * Pemantau pemakaian budget + pengirim peringatan (>=90% warning, >=100% danger),
+ * dipanggil dari model event Expense::saved. Tiap ambang dikirim sekali per budget
+ * per periode via klaim atomik flag notified_90_at/notified_100_at; dikunci NotificationTriggersTest.
  */
 class BudgetAlertService
 {
@@ -35,12 +21,8 @@ class BudgetAlertService
     public const WARNING_RATIO = 0.9;
 
     /**
-     * Periksa ulang seluruh budget yang tersentuh oleh expense yang baru
-     * disimpan/diubah, lalu kirim notifikasi untuk ambang yang baru tercapai.
-     *
-     * Metode ini tidak boleh pernah menggagalkan penyimpanan expense itu
-     * sendiri (notifikasi hanyalah efek samping), maka semua exception
-     * ditangkap dan hanya dicatat ke log.
+     * Periksa ulang budget yang tersentuh expense lalu kirim notifikasi ambang baru.
+     * Exception ditelan + dicatat log — notifikasi tidak boleh menggagalkan penyimpanan.
      */
     public function checkAndNotify(Expense $expense): void
     {
@@ -111,13 +93,9 @@ class BudgetAlertService
     }
 
     /**
-     * Kirim notifikasi satu ambang batas, tetapi hanya bila flag-nya masih
-     * kosong untuk budget & periode ini.
-     *
-     * Kolom flag diklaim dulu secara atomik (UPDATE ... WHERE flag IS NULL):
-     * bila hasilnya 0 baris berarti notifikasi ambang ini sudah pernah
-     * dikirim sebelumnya, lalu pengiriman dilewati. Ini mencegah dobel
-     * walau dua save terjadi hampir bersamaan.
+     * Kirim notifikasi satu ambang, hanya bila flag-nya masih kosong. Flag diklaim
+     * atomik (UPDATE ... WHERE flag IS NULL) supaya dua save beruntun tidak
+     * mengirim notifikasi yang sama dua kali.
      */
     private function notifyThresholdOnce(Budget $budget, string $flagColumn, float $spent, int $month, int $year): void
     {

@@ -7,12 +7,8 @@ use App\Models\Expense;
 use Filament\Widgets\ChartWidget;
 
 /**
- * Grafik donat proporsi pengeluaran KESELURUHAN (semua waktu) per kategori.
- *
- * Menggunakan GROUP BY category_id; expense tanpa kategori dikelompokkan ke
- * "Tanpa Kategori". Query memakai model Expense (ter-scope per-user), dan
- * warna tiap irisan diambil dari atribut warna kategori. Tidak ada filter
- * periode bulan/tahun — seluruh riwayat expense ikut dihitung.
+ * Grafik donat pengeluaran seluruh waktu per kategori; expense tanpa kategori
+ * dikelompokkan ke "Tanpa Kategori", warna irisan dari atribut kategori.
  */
 class CategoryChart extends ChartWidget
 {

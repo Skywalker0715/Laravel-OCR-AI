@@ -7,14 +7,8 @@ use App\Models\Expense;
 use Illuminate\Console\Command;
 
 /**
- * Memberi kategori kepada expense lama yang masih kosong (category_id NULL).
- *
- * Kenapa command terpisah, bukan dengan migrate:fresh / migration: karena
- * expense lama tidak boleh hilang. Perintah ini hanya back-fill nilai
- * category_id, tanpa menyentuh/mengubah baris yang sudah punya kategori.
- *
- * Cara menjalankan:
- *   php artisan expenses:assign-default-category
+ * Back-fill kategori "Lainnya" untuk expense lama yang category_id-nya NULL,
+ * tanpa menyentuh expense yang sudah punya kategori.
  */
 class AssignDefaultCategory extends Command
 {

@@ -9,10 +9,8 @@ use Illuminate\Support\Facades\Auth;
 
 /**
  * Membatasi query Expense hanya pada data milik user yang sedang login.
- *
- * Scope ini sengaja hanya aktif ketika ada user yang login (Auth::check()),
- * sehingga query yang berjalan dari console/queue (tanpa konteks user)
- * tidak ikut terfilter dan tetap bisa dipakai untuk keperluan sistem.
+ * Sengaja nonaktif tanpa sesi login (console/queue) agar query sistem tetap berjalan;
+ * perilaku scoping dikunci oleh MultiUserExpenseScopingTest.
  */
 class OwnedByUserScope implements Scope
 {

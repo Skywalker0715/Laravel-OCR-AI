@@ -31,11 +31,12 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 ## Requirement
 
 - PHP >= 8.2 dengan ekstensi `pdo_pgsql`, `gd`, `mbstring`
-- Composer, Node.js + npm (build aset Vite)
+- Composer, Node.js + npm (mensupply `npx concurrently` untuk `composer run dev`)
 - PostgreSQL >= 13
-- **Tesseract OCR** ter-install di server + language data `ind` dan `eng`
-  (Windows: installer UB-Mannheim; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
+- **Tesseract OCR** ter-install di server + language data **`ind` dan `eng`**
+  (Windows: installer UB-Mannheim — pastikan mencentang kedua language pack, atau salin `ind.traineddata` & `eng.traineddata` ke `C:\Program Files\Tesseract-OCR\tessdata`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
 - Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
+- Ekstensi `pcntl` (khusus Linux/Mac, **opsional**) — hanya dibutuhkan slot `logs` pada `composer run dev` (Laravel Pail); di Windows slot ini otomatis dilewati
 
 ## Instalasi
 
@@ -46,6 +47,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
    composer install
    npm install && npm run build
    ```
+   > `npm install` **wajib** dijalankan meski tidak memakai Vite, karena `composer run dev` memakai `npx concurrently` (berasal dari `npm install`).
 
 2. Salin `.env.example` menjadi `.env`, lalu sesuaikan:
    ```env
@@ -76,13 +78,37 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 
 ## Menjalankan Aplikasi
 
-> **PENTING - queue worker wajib berjalan.** Parsing OCR + AI dijalankan async lewat `AIParserJob`. Ada dua mode:
+> **PENTING - queue worker wajib berjalan.** Parsing OCR + AI dijalankan async lewat `AIParserJob`. Tanpa worker, hasil parsing tidak akan pernah terisi.
+
+### Cara Utama (Direkomendasikan): Satu Perintah
+
+`composer run dev` menjalankan **semua layanan sekaligus dalam satu terminal** (paralel lewat `npx concurrently`):
+
+| Slot | Proses | Fungsi |
+|------|--------|--------|
+| `server` | `php artisan serve` | HTTP server di `http://127.0.0.1:8000` |
+| `queue` | `php artisan queue:listen --tries=1` | Worker antrian **WAJIB** (memproses OCR/AI parsing) |
+| `logs` | `php artisan dev:logs` | Log viewer real-time (meneruskan ke `php artisan pail`) |
+| `vite` | `npm run dev` | Asset build hot-reload di `http://localhost:5173` |
+
+```bash
+composer run dev
+```
+
+- **Windows/Laragon** — langsung jalan. Slot `logs` otomatis menampilkan peringatan bahwa **Pail butuh ekstensi `pcntl`** (tidak tersedia di PHP Windows) lalu berhenti bersih (exit 0) tanpa memengaruhi slot lain.
+- **Linux/Mac** — slot `logs` otomatis menjalankan `php artisan pail` bila ekstensi `pcntl` tersedia.
+- Tekan `Ctrl+C` untuk menghentikan seluruh layanan sekaligus.
+
+### Cara Manual (Alternatif/Fallback)
+
+Gunakan cara ini bila `composer run dev` gagal di environment tertentu — misalnya **Windows tanpa Node.js** (perintah `npx` tidak ditemukan) atau saat ingin memisahkan proses secara eksplisit di 2-3 terminal.
 
 **Mode A - `QUEUE_CONNECTION=database` (default, disarankan untuk production):**
 
 ```bash
 php artisan serve           # terminal 1
 php artisan queue:work      # terminal 2 - WAJIB, jangan sampai lupa!
+npm run dev                 # terminal 3 (opsional, hanya untuk hot-reload asset saat development)
 ```
 
 Tanpa worker, hasil parsing tidak akan pernah terisi. Dashboard punya pengaman: bila ada job tertahan lebih dari 5 menit, muncul peringatan "Antrian parsing terhambat". Perintah berguna:
@@ -96,6 +122,8 @@ php artisan queue:retry all     # ulangi job yang gagal
 **Mode B - `QUEUE_CONNECTION=sync` (tanpa worker, untuk personal / dev):**
 
 Parsing dieksekusi langsung saat upload, jadi tidak perlu worker. Trade-off: request upload menjadi sedikit lebih lama karena menunggu OCR + AI selesai.
+
+> **Catatan untuk slot `logs`/Pail:** `php artisan dev:logs` — command pembungkus di `app/Console/Commands/DevLogs.php` — memanggil `php artisan pail` hanya bila ekstensi `pcntl` tersedia. Di sistem tanpa `pcntl` (Windows/PHP NTS), perintah dilewati dengan aman; pantau log via `storage/logs/laravel.log`.
 
 Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`) atau registrasi akun baru (lihat catatan keamanan di bawah).
 
@@ -125,6 +153,36 @@ Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifi
 - **Set `APP_DEBUG=false` di environment production.** Halaman debug dapat membocorkan stack trace dan isi `.env`.
 - **Foto struk disimpan di disk privat** (`receipts` - `storage/app/private/receipts`), BUKAN lagi di `public/storage`. Penyajian hanya lewat route `/receipt-image/{expense}` dengan authorization check (hanya pemilik expense; user lain dan tamu tidak mendapat akses).
 - Kredensial apa pun hanya boleh ada di `.env` (tidak pernah di-commit); `.env.example` disediakan bersih sebagai template.
+
+## Cara Scale Up untuk Banyak User
+
+Konfigurasi bawaan (queue database + 1 worker) sudah lebih dari cukup untuk
+personal/UMKM skala kecil. Ketika aplikasi dipakai banyak user yang upload struk
+bersamaan, berikut langkah-langkah yang bisa dilakukan:
+
+1. **Ganti queue driver ke Redis dan jalankan beberapa worker paralel.** Default
+   `QUEUE_CONNECTION=database` cocok dengan 1 worker, tapi saat banyak user
+   upload struk bersamaan, antrean job akan menumpuk. Ganti driver-nya di `.env`:
+   ```env
+   QUEUE_CONNECTION=redis
+   ```
+   lalu jalankan beberapa worker paralel — `php artisan queue:work --queue=default`
+   bisa dijalankan berkali-kali di proses/terminal terpisah, atau gunakan
+   **Supervisor** / **Laravel Horizon** untuk mengelola banyak worker secara otomatis.
+
+2. **Wajar jika widget "Antrian parsing terhambat" muncul.** Satu job parsing
+   OCR+AI butuh **15-45 detik** (tergantung respons API Cohere). Widget di
+   Dashboard muncul bila ada job tertahan lebih dari **5 menit** — saat lonjakan
+   banyak upload bersamaan dengan 1 worker, ini WAJAR terjadi, **bukan
+   berarti sistem rusak**. Tambah jumlah worker untuk mengurangi hal ini.
+
+3. **Performa asset di production.** Jalankan `npm run build` (**bukan** `npm run
+   dev`) sebelum deploy, dan aktifkan **gzip/brotli compression** di web server
+   (Apache/Nginx) agar ukuran CSS Filament dan asset lainnya lebih kecil.
+
+4. **(Opsional — catatan saja, belum perlu diimplementasikan sekarang):** bila
+   nanti data sudah sangat besar (ribuan baris per user), dashboard bisa di-cache
+   per user untuk meringankan beban query.
 
 ## Struktur Penting
 

@@ -11,17 +11,8 @@ use Filament\Widgets\StatsOverviewWidget;
 use Filament\Widgets\StatsOverviewWidget\Stat;
 
 /**
- * Ringkasan Laporan: Total Pengeluaran, Jumlah Transaksi, dan Rata-rata per
- * Transaksi — dihitung HANYA dari expense yang lolos filter halaman Laporan
- * (periode + kategori).
- *
- * Filter diterima otomatis dari halaman melalui properti reaktif $pageFilters
- * (mekanisme resmi Filament v4: setiap kali form filter halaman berubah,
- * properti ini ikut ter-update dan widget ter-render ulang dengan angka baru).
- *
- * Query memakai model Expense yang ter-scope per-user via OwnedByUserScope,
- * sehingga angka yang tampil selalu milik user yang sedang login. Expense
- * dengan amount NULL (struk yang parsing-nya belum selesai) tidak dihitung.
+ * Ringkasan (total, jumlah, rata-rata) hanya dari expense yang lolos filter
+ * Laporan; angka per-user via OwnedByUserScope, amount NULL tidak dihitung.
  */
 class LaporanStatsOverview extends StatsOverviewWidget
 {

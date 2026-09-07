@@ -8,14 +8,8 @@ use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
- * Penyaji foto struk dari disk privat 'receipts' (temuan audit keamanan #2).
- *
- * Foto struk TIDAK lagi disajikan lewat /storage (disk public) — hanya lewat
- * route ini yang menjamin dua hal:
- *  1. Hanya PEMILIK expense yang bisa melihat fotonya. User lain mendapat
- *     404 (bukan 403) supaya keberadaan file tidak bocor lewat kode status.
- *  2. Tamu diarahkan ke halaman login panel oleh middleware Filament
- *     Authenticate (terpasang di definisi route).
+ * Penyaji foto struk dari disk privat 'receipts' (audit #2). Hanya pemilik expense
+ * yang bisa akses (404 bila bukan pemilik); tamu dialihkan ke login oleh middleware Filament.
  */
 class ReceiptImageController extends Controller
 {
