@@ -1,10 +1,16 @@
 ﻿# Catatan Belanja - Aplikasi Pencatat Pengeluaran Berbasis OCR + AI
 
+![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?logo=laravel&logoColor=white)
+![PHP](https://img.shields.io/badge/PHP-8.2%2B-777BB4?logo=php&logoColor=white)
+![Filament](https://img.shields.io/badge/Filament-v4-F59E0B?logo=laravel&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13%2B-4169E1?logo=postgresql&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-10B981)
+
 Aplikasi web untuk mencatat pengeluaran dari foto struk belanja: unggah foto struk, teks dibaca otomatis (OCR Tesseract), lalu di-parsing menjadi data terstruktur (vendor, tanggal, kategori, item, total, kembalian) oleh AI (Cohere) dengan fallback regex bila API gagal. Hasilnya tersimpan di PostgreSQL dan dikelola lewat panel admin Filament.
 
 Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-user, kategori pengeluaran usaha).
 
-## Fitur
+## 🚀 Fitur
 
 - **Upload struk + OCR** - Tesseract OCR (bahasa Indonesia + Inggris), kompresi gambar otomatis (GD) sebelum diproses.
 - **Parsing AI + fallback** - Cohere mengubah teks OCR menjadi JSON terstruktur; bila API gagal atau tidak ada key, parser regex bawaan mengambil alih otomatis. Jalur parsing (AI / estimasi) tampil di halaman detail.
@@ -17,7 +23,21 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 - **Notifikasi parsing** - hasil parsing (sukses / estimasi / gagal-total) dikirim ke database notification berisi link "Periksa & Edit".
 - **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan).
 
-## Tech Stack
+## Cara Kerja
+
+```mermaid
+flowchart TD
+    A[📷 Upload Foto Struk] --> B[🔍 OCR - Tesseract]
+    B --> C{Coba Parsing AI}
+    C -->|Berhasil| D[🤖 AI - Cohere]
+    C -->|API gagal / timeout| E[⚙️ Fallback Regex]
+    D --> F[(🗄️ PostgreSQL)]
+    E --> F
+    F --> G[🔔 Notifikasi ke User]
+    F --> H[📊 Dashboard & Laporan]
+```
+
+## 🛠️ Tech Stack
 
 - Laravel 12 (PHP ^8.2)
 - Filament v4 (panel admin)
@@ -28,7 +48,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 - `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
 - Pest (testing)
 
-## Requirement
+## 📋 Requirement
 
 - PHP >= 8.2 dengan ekstensi `pdo_pgsql`, `gd`, `mbstring`
 - Composer, Node.js + npm (mensupply `npx concurrently` untuk `composer run dev`)
@@ -38,7 +58,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 - Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
 - Ekstensi `pcntl` (khusus Linux/Mac, **opsional**) — hanya dibutuhkan slot `logs` pada `composer run dev` (Laravel Pail); di Windows slot ini otomatis dilewati
 
-## Instalasi
+## 📦 Instalasi
 
 1. Clone repo lalu install dependency:
    ```bash
@@ -76,7 +96,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
    php artisan storage:link
    ```
 
-## Menjalankan Aplikasi
+## ▶️ Menjalankan Aplikasi
 
 > **PENTING - queue worker wajib berjalan.** Parsing OCR + AI dijalankan async lewat `AIParserJob`. Tanpa worker, hasil parsing tidak akan pernah terisi.
 
@@ -127,7 +147,7 @@ Parsing dieksekusi langsung saat upload, jadi tidak perlu worker. Trade-off: req
 
 Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`) atau registrasi akun baru (lihat catatan keamanan di bawah).
 
-## Upgrade dari Versi Lama (opsional)
+## 🔄 Upgrade dari Versi Lama (opsional)
 
 Bila memakai versi lama aplikasi (foto struk masih di `storage/app/public/receipts`), pindahkan ke disk privat baru:
 
@@ -137,7 +157,7 @@ php artisan receipts:move-to-private-disk
 
 Command aman dijalankan berulang (idempotent) dan memverifikasi setiap file sebelum menghapus salinan lamanya.
 
-## Testing
+## 🧪 Testing
 
 ```bash
 php artisan test
@@ -145,7 +165,7 @@ php artisan test
 
 Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifikasi, halaman Laporan/Export, dan route foto struk.
 
-## Catatan Keamanan untuk Pembeli/Developer
+## 🔐 Catatan Keamanan untuk Pembeli/Developer
 
 - **Authorization via global scope, bukan Policy.** Aplikasi ini tidak memakai Laravel Policy - isolasi data per-user sepenuhnya lewat global scope `OwnedByUserScope` (model Expense & Budget) ditambah override query di resource Category. Kalau menambah endpoint/route baru **di luar Filament**, tambahkan authorization check manual.
 - **Registrasi terbuka secara default.** Siapa pun bisa mendaftar lewat halaman registrasi panel. Cara menonaktifkan: hapus/comment baris `->registration(Register::class)` di `app/Providers/Filament/AdminPanelProvider.php`.
@@ -154,7 +174,7 @@ Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifi
 - **Foto struk disimpan di disk privat** (`receipts` - `storage/app/private/receipts`), BUKAN lagi di `public/storage`. Penyajian hanya lewat route `/receipt-image/{expense}` dengan authorization check (hanya pemilik expense; user lain dan tamu tidak mendapat akses).
 - Kredensial apa pun hanya boleh ada di `.env` (tidak pernah di-commit); `.env.example` disediakan bersih sebagai template.
 
-## Cara Scale Up untuk Banyak User
+## 📈 Cara Scale Up untuk Banyak User
 
 Konfigurasi bawaan (queue database + 1 worker) sudah lebih dari cukup untuk
 personal/UMKM skala kecil. Ketika aplikasi dipakai banyak user yang upload struk
@@ -184,7 +204,55 @@ bersamaan, berikut langkah-langkah yang bisa dilakukan:
    nanti data sudah sangat besar (ribuan baris per user), dashboard bisa di-cache
    per user untuk meringankan beban query.
 
-## Struktur Penting
+## 🗂️ Struktur Penting
+
+```mermaid
+erDiagram
+    USER ||--o{ EXPENSE : "mencatat"
+    USER ||--o{ BUDGET : "membuat"
+    USER ||--o{ CATEGORY : "kategori pribadi"
+    CATEGORY ||--o{ EXPENSE : "mengelompokkan"
+    CATEGORY ||--o{ BUDGET : "dianggarkan untuk"
+    EXPENSE ||--o{ EXPENSE_ITEM : "berisi"
+
+    USER {
+        bigint id PK
+        string name
+        string email
+    }
+    EXPENSE {
+        bigint id PK
+        bigint user_id FK
+        bigint category_id FK
+        string vendor
+        decimal amount
+        date date_shopping
+        boolean used_fallback
+    }
+    EXPENSE_ITEM {
+        bigint id PK
+        bigint expenses_id FK
+        string name
+        decimal qty
+        decimal price
+        decimal subtotal
+    }
+    CATEGORY {
+        bigint id PK
+        bigint user_id FK "nullable = kategori default"
+        string name
+        string icon
+        string color
+    }
+    BUDGET {
+        bigint id PK
+        bigint user_id FK
+        bigint category_id FK
+        decimal limit_amount
+        int year
+        int month
+    }
+```
 
 ```
 app/Filament/Resources/     Resource admin panel (Expenses, Categories, Budgets)
@@ -196,6 +264,6 @@ app/Console/Commands/       expenses:reprocess, expenses:assign-default-category
                             receipts:move-to-private-disk
 ```
 
-## Lisensi
+## 📄 Lisensi
 
 MIT - bebas digunakan dan dimodifikasi untuk project pribadi maupun klien.
