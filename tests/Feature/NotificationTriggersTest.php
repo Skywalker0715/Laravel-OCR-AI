@@ -44,9 +44,11 @@ function notificationRawDataFor(int $userId): string
 
 test('TRIGGER 1: notif sukses via AI terkirim setelah struk berhasil diparsing', function () {
     Http::fake(['https://api.cohere.ai/*' => Http::response([
-        'messages' => [
-            ['text' => '{"vendor":"Toko Maju","date":"2026-09-02","category":"Makanan & Minuman","items":[{"name":"Beras","qty":1,"price":15000,"subtotal":15000}],"total":15000,"change":0}'],
-        ],
+        // Bentuk v1 ASLI dari /v1/chat: teks hasil ada di key top-level "text".
+        // (Sebelumnya mock pakai {"messages":[{"text":...}]} = bentuk v2 yang
+        // TIDAK dikembalikan endpoint ini — itulah sebabnya test dulu "lulus"
+        // padahal kode ekstraksi rusak di production.)
+        'text' => '{"vendor":"Toko Maju","date":"2026-09-02","category":"Makanan & Minuman","items":[{"name":"Beras","qty":1,"price":15000,"subtotal":15000}],"total":15000,"change":0}',
     ], 200)]);
 
     $user = User::factory()->create();

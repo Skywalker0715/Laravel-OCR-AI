@@ -6,6 +6,9 @@ use App\Models\Category;
 use App\Services\Parsing\RegexItemParser;
 use App\Services\Parsing\TotalReconciler;
 use App\Services\Parsing\VendorDetector;
+use GuzzleHttp\Exception\ConnectException;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -52,9 +55,18 @@ class AIParserService
         $apiKey = config('services.cohere.api_key');
 
         $prompt = <<<PROMPT
-        Analisis teks struk belanja Indonesia ini dan ekstrak informasi ke format JSON yang tepat. Hapus semua mata uang 'Rp', titik, dan koma untuk membuat nilai numerik murni. Tanggal dalam format YYYY-MM-DD. Vendor adalah nama toko di bagian atas. Items: ekstrak qty (angka), name (deskripsi), price (numerik), subtotal (qty * price jika tidak ada). Total: nilai total numerik. Change: total dari 'Kembalian' atau 'Change' (numerik, default 0 jika tidak ada). Category: berikan satu kategori singkat dalam Bahasa Indonesia untuk belanja ini berdasarkan nama vendor/item (misal 'Makanan & Minuman', 'Transportasi', 'Belanja Rumah Tangga', 'Kesehatan', 'Hiburan', atau 'Lainnya' bila tidak jelas).
+        Analisis teks struk belanja Indonesia ini dan ekstrak informasi ke format JSON yang tepat. Hapus semua mata uang 'Rp', titik, dan koma untuk membuat nilai numerik murni. Tanggal dalam format YYYY-MM-DD. Vendor adalah nama toko di bagian atas. Items: ekstrak qty (angka), name (deskripsi), price (numerik), subtotal (qty * price jika tidak ada).
+        Total: nilai total numerik. Jika ada beberapa baris yang terlihat seperti total (misal 'Jumlah', 'Subtotal', 'TOTAL BAYAR', 'Grand Total'), SELALU pilih nilai FINAL/TERAKHIR yang sudah memperhitungkan diskon/pajak/biaya tambahan - biasanya baris paling bawah sebelum info pembayaran (tunai/DP/kembalian). JANGAN pilih subtotal awal sebelum potongan.
+        Change: nilai kembalian tunai. Field 'change' HANYA diisi jika teks OCR secara eksplisit mengandung kata 'Kembali', 'Kembalian', atau 'Change'. JANGAN mengisi change dari nilai DP, Uang Muka, Bayar, Sisa Bayar, atau nilai lain yang bukan kembalian tunai. Jika tidak ada baris kembalian, set change = 0.
+        Category: berikan satu kategori singkat dalam Bahasa Indonesia untuk belanja ini berdasarkan nama vendor/item (misal 'Makanan & Minuman', 'Transportasi', 'Belanja Rumah Tangga', 'Kesehatan', 'Hiburan', atau 'Lainnya' bila tidak jelas).
 
-        Format JSON yang diharapkan (hanya output JSON, tanpa teks tambahan):
+        Format JSON yang diharapkan (hanya output JSON, tanpa teks tambahan).
+
+        ATURAN OUTPUT YANG KETAT:
+        - JANGAN gunakan markdown code fence (jangan bungkus JSON dengan ```).
+        - JANGAN tambahkan kalimat pembuka atau penutup apa pun (mis. "Berikut
+          hasilnya:", "Semoga membantu").
+        - Mulai output LANGSUNG dengan karakter { dan akhiri dengan }.
         {
             "vendor": "Nama Toko",
             "date": "YYYY-MM-DD",
@@ -107,9 +119,37 @@ PROMPT;
 
         $model = config('services.cohere.model', 'command-r-08-2024');
 
+        // Retry TERBATAS: hanya error sementara (transient) yang diulang -
+        // HTTP 5xx / 429, timeout, atau koneksi putus. 4xx lain (mis. 400 key
+        // salah / 401) dan respons yang JSON-nya tidak valid TIDAK di-retry
+        // supaya tidak menguras kuota untuk kesalahan yang pasti terulang.
+        $shouldRetry = function (\Throwable $exception): bool {
+            if ($exception instanceof RequestException) {
+                $status = $exception->response?->status() ?? 0;
+
+                // 429 = rate limit (sementara), 5xx = server error (sementara).
+                return $status === 429 || $status >= 500;
+            }
+
+            // cURL 7/28 (koneksi gagal / timeout) dilempar sebagai ConnectException.
+            return $exception instanceof ConnectException
+                || $exception instanceof ConnectionException;
+        };
+
         try {
 
         $response = Http::withToken($apiKey)
+            // Timeout eksplisit: prompt struk bisa panjang, default Guzzle (30s)
+            // sering kepotong di tengah parsing sehingga request "gagal" padahal
+            // server masih bekerja. 60s menunggu respons, 5s untuk koneksi.
+            ->connectTimeout(5)
+            ->timeout(60)
+            // Maksimal 2x percobaan ulang (total <= 3 request) berjarak 500ms,
+            // hanya bila $shouldRetry bernilai true. Argumen terakhir (false)
+            // membuat respons 5xx/429 yang masih gagal setelah retry dikembalikan
+            // sebagai respons biasa (bukan exception) agar alur sukses -> fallback
+            // tidak terganggu.
+            ->retry(2, 500, $shouldRetry, false)
             ->post('https://api.cohere.ai/v1/chat', [
                 // Model 'command-light' sudah dihapus Cohere (panggilan selalu gagal
                 // → fallback regex); pakai model yang masih tersedia via COHERE_MODEL,
@@ -124,7 +164,23 @@ PROMPT;
         if (! $response->successful()) {
             Log::error('Cohere API request gagal (model='.$model.', status='.$response->status().'): '.$response->body());
         } else {
-            $raw = $response->json('messages.0.text') ?? '';
+            // FIX ROOT CAUSE: endpoint yang dipanggil adalah v1 (/v1/chat) yang
+            // meletakkan hasil di key top-level "text". Kode lama membaca
+            // "messages.0.text" (format v2) sehingga SELALU kosong -> AI yang
+            // sebenarnya sukses tetap dianggap gagal dan jatuh ke fallback regex.
+            // Baca "text" dulu (v1 asli), lalu "message.content.0.text" sebagai
+            // pengaman jika suatu saat aplikasi dipindah ke v2/chat.
+            $raw = $response->json('text') ?? $response->json('message.content.0.text') ?? '';
+
+            // Bukti diagnosis: kalau $raw masih kosong, log FULL response body
+            // (bukan hanya hasil ekstraksi) supaya kegagalan di masa depan bisa
+            // dianalisis tanpa menebak-nebak format aktual dari Cohere.
+            if ($raw === '') {
+                Log::warning(
+                    'Cohere raw body kosong setelah ekstraksi pesan - full body dilampirkan untuk diagnosis',
+                    ['body' => $response->body()]
+                );
+            }
             Log::info('Raw AI response (model='.$model.', status='.$response->status().'): '.$raw);
 
             $onlyJson = $this->helper->cleanCohereResponse($raw);

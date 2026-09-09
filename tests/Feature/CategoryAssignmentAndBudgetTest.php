@@ -70,6 +70,95 @@ test('AIParserJob menetapkan category_id berdasarkan tebak kategori fallback', f
     expect((float) $expense->amount)->toBeGreaterThan(0.0);
 });
 
+test('AIParserJob TIDAK menimpa category_id yang SUDAH dipilih user manual (jalur AI)', function () {
+    // Mock Cohere sukses dengan kategori yang JALURNYA dari pilihan manual user,
+    // untuk mem-bukti bahwa tebakan AI tidak boleh langsup menimpa expense.
+    Http::fake(['https://api.cohere.ai/*' => Http::response([
+        'text' => '{"vendor":"SPBU Pertamina","date":"2026-09-02","category":"Makanan & Minuman","items":[{"name":"Bensin","qty":1,"price":50000,"subtotal":50000}],"total":50000,"change":0}',
+    ], 200)]);
+
+    $user = User::factory()->create();
+
+    // User SUDAH memilih kategori manual "Transportasi" saat create expense.
+    $manualCategory = Category::resolveFromLabel('Transportasi', $user->id);
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'SPBU Bensin',
+        'category_id' => $manualCategory->id,
+        'note' => 'SPBU Pertamina\n2026-09-02\nTotal Rp 50.000\n',
+    ]);
+
+    (new AIParserJob($expense))->handle();
+    $expense->refresh();
+
+    // Tebakan AI ("Makanan & Minuman") TIDAK boleh menimpa kategori manual.
+    expect($expense->used_fallback)->toBeFalse();
+    expect($expense->category_id)->toBe($manualCategory->id);
+    expect($expense->category->name)->toBe('Transportasi');
+});
+
+test('AIParserJob TIDAK menimpa category_id manual saat reprocess "Proses Ulang" (forceReocr)', function () {
+    // AI gagal → jalur fallback regex; fallback menginfer "Makanan & Minuman"
+    // dari vendor/item Indomaret, tapi kategori manual user "Transportasi"
+    // harus tetap dipreserve — reprocess tombol "Proses Ulang" jalan lewat
+    // reprocess($record, true) yang same method ini.
+    Http::fake(['https://api.cohere.ai/*' => Http::response('error', 500)]);
+
+    $user = User::factory()->create();
+
+    $manualCategory = Category::resolveFromLabel('Transportasi', $user->id);
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'SPBU Bensin',
+        'category_id' => $manualCategory->id,
+        'note' => <<<'TXT'
+        Indomaret
+        Jl. Merdeka No 1
+        2023-08-04 15:36
+        1 x Nasi Padang Rp15.000
+        Total Rp25.000
+        Kembalian Rp0
+        TXT,
+    ]);
+
+    // forceReocr=true = alur tombol "Proses Ulang OCR & AI" (ViewExpense).
+    $result = (new AIParserJob($expense))->reprocess($expense, true);
+    $expense->refresh();
+
+    expect($result['ok'])->toBeTrue();
+    expect($expense->used_fallback)->toBeTrue();
+
+    // Kategori manual tetap "Transportasi", bukan hasil infer fallback
+    // ("Makanan & Minuman" dari vendor Indomaret).
+    expect($expense->category_id)->toBe($manualCategory->id);
+    expect($expense->category->name)->toBe('Transportasi');
+});
+
+test('AIParserJob masih mengisi category_id otomatis bila user BELUMBA memilih kategori (jalur AI)', function () {
+    // Expense tanpa kategori manual → tebakan AI tetap diisi otomatis
+    // (perilaku lama untuk kasus ini harus tetap jalan).
+    Http::fake(['https://api.cohere.ai/*' => Http::response([
+        'text' => '{"vendor":"SPBU Pertamina","date":"2026-09-03","category":"Transportasi","items":[{"name":"Bensin","qty":1,"price":25000,"subtotal":25000}],"total":25000,"change":0}',
+    ], 200)]);
+
+    $user = User::factory()->create();
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'SPBU Bensin',
+        'note' => 'SPBU Pertamina\n2026-09-03\nTotal Rp 25.000\n',
+    ]);
+
+    (new AIParserJob($expense))->handle();
+    $expense->refresh();
+
+    expect($expense->used_fallback)->toBeFalse();
+    expect($expense->category_id)->not->toBeNull();
+    expect($expense->category->name)->toBe('Transportasi');
+});
+
 test('AIParserJob memberi peringatan ketika expense melebihi budget kategori', function () {
     Http::fake(['https://api.cohere.ai/*' => Http::response('status tidak tersedia', 500)]);
 

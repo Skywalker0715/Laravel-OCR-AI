@@ -49,9 +49,10 @@ test('halaman View Expense menampilkan notice ketika struk diproses lewat fallba
 
 test('halaman View Expense tidak menampilkan notice ketika struk diproses oleh AI Cohere', function () {
     Http::fake(['https://api.cohere.ai/*' => Http::response([
-        'messages' => [
-            ['text' => '{"vendor":"Toko Maju","date":"2023-08-02","category":"Makanan & Minuman","items":[{"name":"Beras","qty":1,"price":15000,"subtotal":15000}],"total":15000,"change":0}'],
-        ],
+        // Bentuk v1 asli dari /v1/chat: teks hasil di key top-level "text" (bukan
+        // {"messages":[...]} versi v2 — bentuk v2 itu yang dulu membuat mock
+        // "lulus" padahal ekstraksi kode di production rusak).
+        'text' => '{"vendor":"Toko Maju","date":"2023-08-02","category":"Makanan & Minuman","items":[{"name":"Beras","qty":1,"price":15000,"subtotal":15000}],"total":15000,"change":0}',
     ], 200)]);
 
     $user = User::factory()->create();

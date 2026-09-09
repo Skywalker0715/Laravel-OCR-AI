@@ -25,7 +25,11 @@ class AIParserJob implements ShouldQueue
 
     public $tries = 3;
 
-    public $timeout = 60;
+    // Timeout job diperpanjang (60 -> 150 detik) mengikuti kenaikan timeout
+    // request HTTP ke Cohere di AIParserService (60s + max 2 retry + jeda
+    // 500ms) plus waktu OCR & simpan DB - job tidak boleh di-kill duluan
+    // sebelum request AI yang lebih panjang itu sempat selesai.
+    public $timeout = 150;
 
     public $backoff = [10, 30, 60];
 
@@ -99,19 +103,73 @@ class AIParserJob implements ShouldQueue
         $lines = array_values(array_filter(array_map('trim', explode("\n", $note))));
         $items = $parsed['items'] ?? [];
 
-        // 2) Normalisasi field dengan "best-effort": bila AI/fallback memberi
-        //    nilai kosong, isi dengan nilai paling mendekati (baris "Total
-        //    Belanja" / angka terbesar di teks OCR) agar amount tidak pernah
-        //    tertinggal kosong.
+        // 2) Guard Total (jalur AI & fallback) — struk dengan diskon punya
+        //    beberapa kandidat total ("Jumlah" sebelum diskon vs "TOTAL BAYAR"
+        //    sesudah diskon) dan AI kadang memilih pra-diskon. Lapisan validasi
+        //    memakai baris total FINAL eksplisit ("TOTAL BAYAR"/"GRAND TOTAL"/dll.)
+        //    sebagai pembanding ber-confidence tinggi. Timpa nilai parsing hanya
+        //    bila memang tepat (lihat explicitTotalOverrideJustified): label
+        //    eksplisit TIDAK boleh menimpa parsing yang didukung penjumlahan
+        //    item — bisa jadi labelnya yang salah baca OCR (kasus BNI: OCR baca
+        //    "TOTAL BAYAR Rp 148.975" padahal TAG PLN + ADMIN BANK = 146.975).
         $amount = (float) ($parsed['total'] ?? 0);
-        if ($amount <= 0) {
+
+        $explicitFinalTotal = $this->extractExplicitFinalTotal($lines);
+        if ($explicitFinalTotal !== null) {
+            if ($this->explicitTotalOverrideJustified($amount, $items, $explicitFinalTotal['value'], $lines)) {
+                if (abs($explicitFinalTotal['value'] - $amount) > 0.01) {
+                    Log::warning(sprintf(
+                        'Guard Total (record %d): baris total final eksplisit "%s" = %.2f dipakai menggantikan nilai parsing %.2f (kandidat total pra-diskon atau kosong).',
+                        $record->id,
+                        $explicitFinalTotal['label'],
+                        $explicitFinalTotal['value'],
+                        $amount,
+                    ));
+                }
+                $amount = $explicitFinalTotal['value'];
+            } else {
+                Log::warning(sprintf(
+                    'Guard Total (record %d): nilai parsing %.2f konsisten dengan penjumlahan item, sedangkan baris "%s" = %.2f beda tanpa penjelasan diskon/biaya — parsing dipertahankan (label kemungkinan salah baca OCR). Mohon cek kelengkapan.',
+                    $record->id,
+                    $amount,
+                    $explicitFinalTotal['label'],
+                    $explicitFinalTotal['value'],
+                ));
+            }
+        } elseif ($amount <= 0) {
             $amount = $this->helper->extractBestTotal($lines, $items);
+        } else {
+            // Tanpa label eksplisit, bandingan longgar dengan extractBestTotal:
+            // nilai AI tetap dipakai (signal confidence rendah), namun selisih
+            // signifikan dicatat ke log agar user bisa cek kelengkapan.
+            $bestTotal = $this->helper->extractBestTotal($lines, $items);
+            if ($bestTotal > 0 && abs($bestTotal - $amount) > 0.01) {
+                Log::warning(sprintf(
+                    'Guard Total (record %d): nilai total %.2f beda signifikan dari extractBestTotal %.2f - nilai parsing tetap dipakai, mohon cek kelengkapan.',
+                    $record->id,
+                    $amount,
+                    $bestTotal,
+                ));
+            }
         }
         $amount = round(max(0, $amount), 2);
 
         $vendor = trim((string) ($parsed['vendor'] ?? ($lines[0] ?? '')));
         $date = $this->normalizeDate($parsed['date'] ?? null);
+
+        // 3) Guard Kembalian (jalur AI & fallback) - AI kadang memilih angka baris
+        //    yang BUKAN kembalian tunai (mis. DP/Bayar, Uang Muka, Sisa Bayar) saat
+        //    struk tidak punya baris kembalian. Change hanya dipreserve bila teks
+        //    OCR memuat kata kunci kembalian di baris yang berisi angka.
         $change = (float) ($parsed['change'] ?? 0);
+        if ($change != 0.0 && ! $this->noteMentionsChangeKey($note)) {
+            Log::warning(sprintf(
+                'Guard Kembalian (record %d): teks OCR tidak memuat kata kunci kembali/change tetapi hasil parsing memberi change=%.2f (kemungkinan DP/Uang Muka/Sisa Bayar) - change dipaksa 0.',
+                $record->id,
+                $change,
+            ));
+            $change = 0.0;
+        }
 
         $categoryLabel = $parsed['category'] ?? Category::inferCategoryName($vendor);
         $category = Category::resolveFromLabel($categoryLabel, $record->user_id);
@@ -120,7 +178,15 @@ class AIParserJob implements ShouldQueue
         // di-guard batas kolom (migration 2026_09_03_000001) — angka tak wajar hasil
         // parsing di-NULL-kan + warning agar save() tetap sukses (title & foto tersimpan).
         $record->vendor = $vendor !== '' ? $vendor : null;
-        $record->date_shopping = $date;
+
+        // Tanggal belanja hasil parse hanya diisi bila kolom masih kosong/NULL -
+        // tanggal yang SUDAH ditetapkan user manual (saat create, form Edit, atau
+        // reprocess "Proses Ulang") tidak ditimpa oleh hasil parse. Prinsip
+        // manual-field override, konsisten dengan kategori di bawah: job TIDAK
+        // menimpa field yang sudah punya nilai dari user.
+        if (blank($record->date_shopping)) {
+            $record->date_shopping = $date;
+        }
         $record->amount = $this->sanitizeMoneyForColumn(
             $amount, 'expenses.amount', self::MAX_EXPENSE_AMOUNT, $record->id
         );
@@ -128,7 +194,15 @@ class AIParserJob implements ShouldQueue
             $change, 'expenses.change', self::MAX_EXPENSE_CHANGE, $record->id
         );
         $record->parsed_data = $items;
-        $record->category_id = $category?->id;
+
+        // Kategori hasil parse (tebakan AI "category" maupun fallback regex) hanya
+        // diisi bila kolom category_id masih kosong/NULL. User yang SUDAH memilih
+        // kategori manual saat create, form Edit, atau reprocess "Proses Ulang"
+        // TIDAK boleh ditimpa oleh tebakan AI. Prinsip sama dengan date_shopping:
+        // job tidak menimpa field yang sudah punya nilai dari user.
+        if (blank($record->category_id)) {
+            $record->category_id = $category?->id;
+        }
         // Simpan juga jalur parsing yang dipakai (true = fallback regex,
         // false = AI Cohere). Dipakai halaman View Expense untuk menampilkan
         // notice informasi "diproses otomatis" tanpa memanggil API lagi.
@@ -264,6 +338,149 @@ class AIParserJob implements ShouldQueue
         }
 
         return $value;
+    }
+
+    /**
+     * Cari baris total FINAL eksplisit (pasca-diskon/pajak) ber-confidence tinggi:
+     * "TOTAL BAYAR", "GRAND TOTAL", "TOTAL TAGIHAN", "TOTAL PEMBAYARAN",
+     * "TOTAL AKHIR", atau "JUMLAH BAYAR". Baris pembayaran (DP/Bayar, Sisa Bayar,
+     * Uang Muka, Dibayar) di-skip agar nominalnya tidak tertangkap sebagai total.
+     *
+     * @param  array<int, string>  $lines  Baris teks OCR yang sudah di-trim.
+     * @return array{label: string, value: float}|null  null bila tidak ditemukan.
+     */
+    private function extractExplicitFinalTotal(array $lines): ?array
+    {
+        $finalPatterns = [
+            '/\btotal\s+bayar\b/iu',
+            '/\bgrand\s+total\b/iu',
+            '/\btotal\s+tagihan\b/iu',
+            '/\btotal\s+pembayaran\b/iu',
+            '/\btotal\s+akhir\b/iu',
+            '/\bjumlah\s+bayar\b/iu',
+        ];
+
+        // Skip baris pembayaran yang mengandung kata bayar/dp tapi bukan total final.
+        $paymentPattern = '/\b(dibayar|dp\s*\/\s*bayar|sisa\s+bayar|uang\s+muka|\bdp\b)\b/i';
+
+        foreach ($lines as $line) {
+            $lower = mb_strtolower($line);
+
+            if (preg_match($paymentPattern, $lower) === 1) {
+                continue;
+            }
+
+            foreach ($finalPatterns as $pattern) {
+                if (preg_match($pattern, $lower) === 1) {
+                    $value = $this->helper->extractLargestNumber($line);
+                    if ($value > 0) {
+                        return ['label' => trim($line), 'value' => $value];
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Putuskan apakah baris total final eksplisit layak menimpa nilai parsing.
+     *
+     * Eksplisit menimpa parsing bila salah satu terpenuhi:
+     *  1. parsing kosong/nol — tidak ada nilai yang perlu dipertahankan;
+     *  2. parsing TIDAK didukung penjumlahan subtotal item (berdiri sendiri,
+     *     biasanya AI menangkap baris "Jumlah" pra-diskon — kasus struk laundry);
+     *  3. parsing didukung item, tetapi selisihnya ke nilai eksplisit dijelaskan
+     *     baris diskon/biaya (mis. "Diskon Member 10% -Rp 6.600" menjelaskan
+     *     66.000 → 59.400).
+     *
+     * Bila parsing didukung penjumlahan item DAN selisih tidak dijelaskan baris
+     * apapun, label eksplisit kemungkinan salah baca OCR (kasus BNI: "TOTAL
+     * BAYAR Rp 148.975" padahal item berjumlah tepat 146.975) — parsing
+     * dipertahankan dan mismatch hanya dilaporkan ke log.
+     *
+     * @param  array<int, array<string, mixed>>  $items  Item hasil parsing.
+     * @param  array<int, string>  $lines  Baris teks OCR yang sudah di-trim.
+     */
+    private function explicitTotalOverrideJustified(float $parsedTotal, array $items, float $explicitValue, array $lines): bool
+    {
+        if ($parsedTotal <= 0) {
+            return true;
+        }
+
+        $itemSum = 0.0;
+        foreach ($items as $item) {
+            $itemSum += max(0, (float) ($item['subtotal'] ?? 0));
+        }
+
+        $itemSumCorroborates = $itemSum > 0 && abs($itemSum - $parsedTotal) <= 0.01;
+        if (! $itemSumCorroborates) {
+            return true;
+        }
+
+        return $this->differenceExplainedByAdjustmentLine(
+            abs($explicitValue - $parsedTotal),
+            $parsedTotal,
+            $lines
+        );
+    }
+
+    /**
+     * True bila selisih antara dua kandidat total dijelaskan oleh baris
+     * diskon/biaya di teks struk — selisih cocok dengan nominal di baris
+     * tersebut (mis. "-Rp 6.600") atau dengan persentase diskon terhadap
+     * total pra-diskon (mis. "Diskon 10%" dari 66.000 = 6.600). False bila
+     * selisih tidak punya penjelasan, yang menandakan salah satu kandidat
+     * salah baca OCR.
+     *
+     * @param  array<int, string>  $lines
+     */
+    private function differenceExplainedByAdjustmentLine(float $diff, float $baseAmount, array $lines): bool
+    {
+        if ($diff <= 0.01) {
+            return true;
+        }
+
+        $adjustmentPattern = '/disc|diskon|potong|hemat|rabat|biaya|admin|ongkir|ongkos|service|charge|fee|pajak|tax|ppn/iu';
+
+        foreach ($lines as $line) {
+            if (preg_match($adjustmentPattern, $line) !== 1) {
+                continue;
+            }
+
+            // Nominal eksplisit di baris diskon/biaya (mis. "Diskon ... -Rp 6.600").
+            $number = $this->helper->extractLargestNumber($line);
+            if ($number > 0 && abs($number - $diff) <= 0.01) {
+                return true;
+            }
+
+            // Persentase diskon (mis. "Diskon Member 10%") terhadap total
+            // pra-diskon; toleransi Rp 1 untuk pembulatan.
+            if (preg_match('/(\d+(?:[.,]\d+)?)\s*%/u', $line, $m) === 1) {
+                $percent = (float) str_replace(',', '.', $m[1]);
+                if (abs($baseAmount * $percent / 100 - $diff) <= 1.0) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * True bila teks OCR memuat kata kunci kembalian ("kembali"/"change") di baris
+     * yang juga mengandung angka - baris kembalian yang sah. False bila kata kunci
+     * hanya muncul pada naratif (mis. "tidak dapat dikembalikan").
+     */
+    private function noteMentionsChangeKey(string $note): bool
+    {
+        foreach (explode("\n", $note) as $line) {
+            if (preg_match('/kembal|change/iu', $line) === 1 && preg_match('/\d/', $line) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** Notifikasi hasil parsing ke pemilik expense lewat lonceng Filament: sukses AI
