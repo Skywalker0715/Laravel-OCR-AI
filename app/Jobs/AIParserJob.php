@@ -44,6 +44,17 @@ class AIParserJob implements ShouldQueue
 
     private const MAX_EXPENSE_CHANGE = 99999999999999.99;
 
+    /** Ambang selisih ABSOLUT (Rp) SUM(subtotal item) vs Total yang dianggap
+     * signifikan untuk flag items_mismatch. Di bawah ini dianggap noise
+     * pembulatan OCR, bukan salah baca item. */
+    private const MISMATCH_DIFF_ABSOLUTE = 1000.0;
+
+    /** Ambang selisih RELATIF (fraksi dari Total) yang dianggap signifikan.
+     * Signifikan bila selisih melewati ambang absolut ATAU relatif (OR) —
+     * salah baca satu item pada struk bernilai besar bisa berupa persentase
+     * kecil, sedangkan pada struk kecil selisih Rp1.000+ sudah mencurigakan. */
+    private const MISMATCH_DIFF_RELATIVE = 0.05;
+
     private Expense $record;
 
     private Helper $helper;
@@ -209,6 +220,20 @@ class AIParserJob implements ShouldQueue
         // Cast (bool) eksplisit: nilai yang terikat ke PostgreSQL harus
         // boolean asli, bukan integer 1/0 (kolom bertipe boolean).
         $record->used_fallback = (bool) $parser->usedFallback;
+
+        // Guard mismatch item vs Total (jalur AI & fallback): OCR kadang salah
+        // membaca item (mis. dua baris terbaca identik) sehingga SUM(subtotal
+        // item) tidak cocok dengan Total. Flag items_mismatch menandai struk
+        // tersebut agar halaman View Expense menampilkan peringatan cek manual.
+        // Nilai pembanding memakai amount final yang tersimpan di record
+        // (hasil Guard Total di atas, sudah lewat sanitize kolom) — bila
+        // sanitize meng-NULL-kan amount, tidak ada pembanding berarti → false.
+        $record->items_mismatch = $this->detectItemsTotalMismatch(
+            items: $items,
+            amount: (float) ($record->amount ?? 0),
+            lines: $lines,
+            expenseId: $record->id,
+        );
 
         try {
             $record->save();
@@ -426,6 +451,77 @@ class AIParserJob implements ShouldQueue
     }
 
     /**
+     * Deteksi ketidakcocokan antara penjumlahan subtotal item dan Total struk
+     * (kolom `amount`). True bila:
+     *  1. Ada item dan total yang bisa dibandingkan (struk tagihan tanpa item
+     *     seperti listrik/PDAM tidak dinilai mismatch);
+     *  2. Selisih signifikan: > Rp1.000 ATAU > 5% dari Total (OR, lihat
+     *     konstanta MISMATCH_DIFF_*);
+     *  3. Selisih TIDAK bisa dijelaskan baris diskon/PPN/biaya admin dsb. yang
+     *     sudah dikenali Guard Total — termasuk penjelasan dengan residual
+     *     kecil (mis. PPN sah 8.789 + noise salah baca item Rp500), karena
+     *     noise item di bawah toleransi tetap dianggap wajar.
+     *
+     * Jalurnya netral terhadap used_fallback: masalah ini bisa terjadi pada
+     * struk yang berhasil lewat AI sekalipun (kasus struk laundry).
+     *
+     * @param  array<int, mixed>  $items  Item hasil parsing (AI/fallback).
+     * @param  array<int, string>  $lines  Baris teks OCR yang sudah di-trim.
+     */
+    private function detectItemsTotalMismatch(array $items, float $amount, array $lines, int $expenseId): bool
+    {
+        // Tanpa total yang valid, tidak ada pembanding yang berarti.
+        if ($amount <= 0) {
+            return false;
+        }
+
+        // Kriteria validitas item SAMA dengan loop penyimpanan item agar
+        // flag mencerminkan item yang benar-benar tersimpan di database.
+        $itemSum = 0.0;
+        $itemCount = 0;
+        foreach ($items as $item) {
+            if (! is_array($item) || empty($item['name'])) {
+                continue;
+            }
+            $itemSum += max(0, (float) ($item['subtotal'] ?? 0));
+            $itemCount++;
+        }
+
+        // Struk tanpa item (mis. tagihan listrik/PDAM) memang tidak punya
+        // penjumlahan item — bukan kasus mismatch.
+        if ($itemCount === 0 || $itemSum <= 0) {
+            return false;
+        }
+
+        $diff = abs($amount - $itemSum);
+        $relativeDiff = self::MISMATCH_DIFF_RELATIVE * $amount;
+        if ($diff <= self::MISMATCH_DIFF_ABSOLUTE && $diff <= $relativeDiff) {
+            return false;
+        }
+
+        // Selisih dijelaskan pola yang dikenali (diskon/PPN/biaya)? Toleransi
+        // residual memakai ambang absolut flag: baris penjelasan tidak harus
+        // persis sama dengan selisih, sisa selisih <= ambang (atau 1% dari
+        // total, mana yang lebih besar) masih dianggap noise pembacaan item.
+        $baseAmount = max($amount, $itemSum);
+        $residualTolerance = max(self::MISMATCH_DIFF_ABSOLUTE, 0.01 * $baseAmount);
+        if ($this->differenceExplainedByAdjustmentLine($diff, $baseAmount, $lines, $residualTolerance)) {
+            return false;
+        }
+
+        Log::warning(sprintf(
+            'Guard Mismatch Item (record %d): SUM(subtotal %d item) = %.2f tidak cocok dengan Total %.2f (selisih %.2f) tanpa penjelasan diskon/PPN/biaya — flag items_mismatch = true, mohon periksa manual.',
+            $expenseId,
+            $itemCount,
+            $itemSum,
+            $amount,
+            $diff,
+        ));
+
+        return true;
+    }
+
+    /**
      * True bila selisih antara dua kandidat total dijelaskan oleh baris
      * diskon/biaya di teks struk — selisih cocok dengan nominal di baris
      * tersebut (mis. "-Rp 6.600") atau dengan persentase diskon terhadap
@@ -433,9 +529,13 @@ class AIParserJob implements ShouldQueue
      * selisih tidak punya penjelasan, yang menandakan salah satu kandidat
      * salah baca OCR.
      *
+     * @param  float  $tolerance  Toleransi kecocokan nominal baris terhadap
+     *                            selisih (default 0.01 = harus persis, dipakai
+     *                            Guard Total; deteksi mismatch item memakai
+     *                            toleransi lebih besar untuk residual noise).
      * @param  array<int, string>  $lines
      */
-    private function differenceExplainedByAdjustmentLine(float $diff, float $baseAmount, array $lines): bool
+    private function differenceExplainedByAdjustmentLine(float $diff, float $baseAmount, array $lines, float $tolerance = 0.01): bool
     {
         if ($diff <= 0.01) {
             return true;
@@ -450,15 +550,15 @@ class AIParserJob implements ShouldQueue
 
             // Nominal eksplisit di baris diskon/biaya (mis. "Diskon ... -Rp 6.600").
             $number = $this->helper->extractLargestNumber($line);
-            if ($number > 0 && abs($number - $diff) <= 0.01) {
+            if ($number > 0 && abs($number - $diff) <= $tolerance) {
                 return true;
             }
 
             // Persentase diskon (mis. "Diskon Member 10%") terhadap total
-            // pra-diskon; toleransi Rp 1 untuk pembulatan.
+            // pra-diskon; toleransi minimum Rp 1 untuk pembulatan.
             if (preg_match('/(\d+(?:[.,]\d+)?)\s*%/u', $line, $m) === 1) {
                 $percent = (float) str_replace(',', '.', $m[1]);
-                if (abs($baseAmount * $percent / 100 - $diff) <= 1.0) {
+                if (abs($baseAmount * $percent / 100 - $diff) <= max(1.0, $tolerance)) {
                     return true;
                 }
             }

@@ -24,11 +24,13 @@ class Expense extends Model
         'change',
         'vendor',
         'used_fallback',
+        'items_mismatch',
     ];
 
     protected $casts = [
         'parsed_data' => 'array',
         'used_fallback' => 'boolean',
+        'items_mismatch' => 'boolean',
         // date_shopping kini kolom date (bukan string) sejak migration
         // 2026_08_26_000003; cast 'date' membuat akses via Eloquent selalu
         // mengembalikan instance Carbon.

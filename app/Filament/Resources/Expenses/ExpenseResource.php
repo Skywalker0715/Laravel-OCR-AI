@@ -115,6 +115,29 @@ class ExpenseResource extends Resource
             //   Baris 2 : "Foto Struk" + "Daftar Item Belanja" (berdampingan)
             ->columns(2)
             ->components([
+                // Peringatan mismatch item vs Total: SUM(subtotal item) yang
+                // tersimpan tidak cocok dengan kolom `amount` (Total) dan
+                // selisihnya tidak dijelaskan diskon/PPN/biaya manapun —
+                // hampir pasti karena OCR salah membaca salah satu item
+                // (mis. dua baris item terbaca identik). Berbeda dari notice
+                // fallback di bawahnya, banner ini muncul TERLEPAS dari jalur
+                // parsing (AI maupun fallback regex) karena masalah salah
+                // baca item bisa terjadi di kedua jalur.
+                Section::make('Peringatan: jumlah item tidak cocok dengan Total')
+                    ->icon(Heroicon::OutlinedExclamationTriangle)
+                    ->iconColor('warning')
+                    ->secondary()
+                    ->compact()
+                    ->columnSpanFull()
+                    ->visible(fn (Expense $record): bool => (bool) $record->items_mismatch)
+                    ->schema([
+                        TextEntry::make('items_mismatch_notice')
+                            ->hiddenLabel()
+                            ->state('Jumlah item tidak sama dengan Total — kemungkinan ada kesalahan baca OCR pada salah satu item, mohon periksa manual.')
+                            ->color('warning')
+                            ->weight(FontWeight::Medium),
+                    ]),
+
                 // Notice informasi kecil bila struk ini diproses oleh parser
                 // FALLBACK REGEX (bukan AI Cohere) — ditandai flag
                 // `used_fallback` di tabel expenses. Warna info (biru/abu-abu

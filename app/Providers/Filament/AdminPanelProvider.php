@@ -2,6 +2,7 @@
 
 namespace App\Providers\Filament;
 
+use App\Filament\Auth\EditProfile;
 use App\Filament\Auth\Login;
 use App\Filament\Auth\Register;
 use App\Filament\Pages\Dashboard;
@@ -37,8 +38,13 @@ class AdminPanelProvider extends PanelProvider
             // terlampaui yang dikirim dari AIParserJob).
             ->databaseNotifications()
             // Aktifkan halaman profil akun; item "Profile" otomatis muncul di menu avatar.
-            // Docs: https://filamentphp.com/docs/4.x/panels/configuration#enabling-the-profile-page
-            ->profile()
+            // Kustomisasi via App\Filament\Auth\EditProfile — halaman ini menambahkan
+            // aksi destruktif "Hapus Akun" (modal konfirmasi 2 kredensial).
+            // Layout tetap "simple" (default isSimple: true) agar halaman terus
+            // ikut dekorasi background custom di layout/simple.blade.php — tombol
+            // hapus akun dirender di BODY halaman (override content()), bukan header.
+            // Docs: https://filamentphp.com/docs/4.x/users/overview#customizing-the-authentication-features
+            ->profile(EditProfile::class)
             ->brandName('Catatan Belanja')
             // Logo header = gambar logo + nama "Catatan Belanja" (kata
             // "Belanja" hijau, sesuai gaya welcome.blade.php).
