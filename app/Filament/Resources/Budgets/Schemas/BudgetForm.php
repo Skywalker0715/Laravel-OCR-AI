@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Budgets\Schemas;
 
 use App\Models\Budget;
+use App\Models\Category;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Schemas\Components\Section;
@@ -30,12 +31,23 @@ class BudgetForm
                     ->schema([
                         Select::make('category_id')
                             ->label('Kategori')
-                            ->relationship('category', 'name')
+                            ->options(fn (): array => Category::query()
+                                ->where(function (Builder $query): void {
+                                    $query->whereNull('user_id')
+                                          ->orWhere('user_id', Auth::id());
+                                })
+                                ->orderBy('name')
+                                ->pluck('name', 'id')
+                                ->all())
                             ->searchable()
                             ->preload()
                             ->nullable()
                             ->placeholder('Semua kategori')
                             ->columnSpan(1),
+                            // Filter opsi kategori: hanya tampilkan kategori default
+                            // sistem (user_id NULL) dan kategori milik user login.
+                            // Pola sama dengan ExpenseForm — tanpa scope, model Category
+                            // tanpa OwnedByUserScope akan menampilkan kategori milik user lain.
 
                         TextInput::make('amount')
                             ->label('Jumlah Anggaran')

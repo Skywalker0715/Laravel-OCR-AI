@@ -15,6 +15,8 @@ use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
+use App\Models\Category;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Js;
 use Throwable;
 
@@ -71,12 +73,23 @@ class ExpenseForm
 
                         Select::make('category_id')
                             ->label('Kategori')
-                            ->relationship('category', 'name')
+                            ->options(fn (): array => Category::query()
+                                ->where(function (Builder $query): void {
+                                    $query->whereNull('user_id')
+                                          ->orWhere('user_id', auth()->id());
+                                })
+                                ->orderBy('name')
+                                ->pluck('name', 'id')
+                                ->all())
                             ->searchable()
                             ->preload()
                             ->nullable()
                             ->placeholder('Pilih kategori (opsional)')
-                            ->columnSpan(1),
+                            ->columnSpan(1)
+                            // Filter opsi kategori: hanya tampilkan kategori default
+                            // sistem (user_id NULL) dan kategori milik user login.
+                            // Tanpa scope eksplisit, Category tanpa OwnedByUserScope akan
+                            // menampilkan kategori milik user lain di dropdown ini.
                     ])
                     // Tombol aksi & Cancel ditempatkan di footer Section ini
                     // (bukan di footer form paling bawah yang full-width

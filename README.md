@@ -43,7 +43,7 @@ flowchart TD
 - Filament v4 (panel admin)
 - PostgreSQL
 - Tesseract OCR (`thiagoalessio/tesseract_ocr`)
-- Cohere API (parsing AI) + parser regex fallback
+- Cohere API (parsing AI); model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal)
 - GD (kompresi / pra-proses gambar)
 - `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
 - Pest (testing)
@@ -78,6 +78,7 @@ flowchart TD
    DB_USERNAME=...
    DB_PASSWORD=...
    COHERE_API_KEY=      # opsional
+   COHERE_MODEL=command-r7b-12-2024   # model AI parsing (default)
    APP_DEBUG=false      # WAJIB false di production
    ```
    Kemudian generate app key:
