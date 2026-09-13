@@ -66,7 +66,7 @@ flowchart TD
 4. Trial Key ini GRATIS 100%, cukup untuk 1.000 panggilan API per bulan, cocok untuk penggunaan personal/testing. **CATATAN PENTING:** Trial Key TIDAK BOLEH dipakai untuk aplikasi komersial/production dengan banyak user — untuk itu perlu upgrade ke Production Key berbayar (lihat cohere.com/pricing untuk detail biaya).
 5. Paste key yang sudah di-copy ke file .env, isi variabel `COHERE_API_KEY=<key_kamu_disini>`.
 6. **PENTING:** jangan pernah share/commit file `.env` ke manapun (sudah otomatis di-gitignore oleh project ini) — API key itu bersifat rahasia seperti password.
-7. Kalau tidak ingin pakai Cohere sama sekali, aplikasi tetap bisa berjalan normal memakai parser fallback regex bawaan (tanpa AI), cukup biarkan `COHERE_API_KEY` kosong di `.env`.
+7. **Tetap tangguh tanpa AI.** Aplikasi ini dirancang dengan fallback parser bawaan — jika Cohere API tidak tersedia (belum setup API key, sedang down, atau limit trial habis), sistem OTOMATIS beralih ke parser cerdas berbasis pola tanpa kehilangan fungsi utama. Ingin pakai tanpa AI sama sekali? Cukup biarkan `COHERE_API_KEY` kosong di `.env` — aplikasi tetap berjalan penuh.
 
 ## 📦 Instalasi
 

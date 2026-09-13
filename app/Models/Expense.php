@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 class Expense extends Model
@@ -86,10 +87,36 @@ class Expense extends Model
 
         // Bersihkan pula foto struk saat sebuah expense dihapus agar tidak
         // tersisa file orphan di storage/receipts/.
+        //
+        // Audit #3: disk 'receipts' punya konfigurasi throw=false, sehingga
+        // Storage::delete() MENGGUNGKAN mengembalikan false (bukan exception)
+        // saat gagal (mis. permission error). Jika tidak dicek eksplisit,
+        // DB transaction tetap commit dan file fisik menjadi orphan.
+        // Solusi: cek return value; jika false, log + throw agar DB::transaction
+        // rollback dan tidak ada data yang setengah terhapus.
         static::deleted(function (Expense $expense): void {
             if ($expense->receipt_image) {
                 // Disk privat 'receipts' (temuan audit #2) — bukan lagi disk public.
-                Storage::disk('receipts')->delete($expense->receipt_image);
+                // throw=false pada disk berarti delete() mengembalikan false
+                // (bukan exception) saat gagal — perlu dicek eksplisit di sini.
+                $deleted = Storage::disk('receipts')->delete($expense->receipt_image);
+
+                if (! $deleted) {
+                    Log::warning('Gagal menghapus file struk saat expense dihapus', [
+                        'expense_id' => $expense->id,
+                        'receipt_image' => $expense->receipt_image,
+                        'user_id' => $expense->user_id,
+                    ]);
+
+                    // Throw untuk memaksa DB::transaction rollback ketika
+                    // dipanggil dari dalam konteks transaction (DeleteUserAccountService).
+                    // Di luar transaction, exception ini akan menghentikan
+                    // penghapusan expense ini sambil tetap aman.
+                    throw new \RuntimeException(
+                        "Gagal menghapus file struk fisik: {$expense->receipt_image}. "
+                        . 'Penghapusan expense dibatalkan untuk menjaga konsistensi data.'
+                    );
+                }
             }
         });
     }

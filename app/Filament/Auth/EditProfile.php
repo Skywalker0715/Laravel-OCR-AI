@@ -3,6 +3,8 @@
 namespace App\Filament\Auth;
 
 use App\Services\DeleteUserAccountService;
+use DanHarrin\LivewireRateLimiting\Exceptions\TooManyRequestsException;
+use DanHarrin\LivewireRateLimiting\WithRateLimiting;
 use Filament\Actions\Action;
 use Filament\Auth\Pages\EditProfile as BaseEditProfile;
 use Filament\Facades\Filament;
@@ -16,6 +18,7 @@ use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
 use Filament\Support\Exceptions\Halt;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\HtmlString;
 use Illuminate\Validation\ValidationException;
 
@@ -31,6 +34,13 @@ use Illuminate\Validation\ValidationException;
  */
 class EditProfile extends BaseEditProfile
 {
+    // Trait rate limiting dari danharrin/livewire-rate-limiting yang sama
+    // yang dipakai Filament Login (rateLimit(5)) & Register (rateLimit(2)).
+    // Audit #4: aksi destruktif "Hapus Akun" belum dilindungi rate limiting
+    // — sekarang ditambahkan rateLimit(3) untuk mencegah brute-force password
+    // via modal konfirmasi.
+    use WithRateLimiting;
+
     /**
      * Aksi form "Hapus Akun": buka modal konfirmasi destruktif. Field
      * konfirmasi divalidasi oleh rule kustom sebelum closure action
@@ -188,16 +198,31 @@ class EditProfile extends BaseEditProfile
     }
 
     /**
-     * Eksekusi penghapusan akun: verifikasi ulang kredensial (safety net),
-     * hapus seluruh data via service (transaction), lalu logout dan
-     * redirect ke halaman login dengan pesan sukses.
+     * Eksekusi penghapusan akun: rate limit (audit #4), verifikasi ulang kredensial
+     * (safety net), hapus seluruh data via service (transaction), lalu logout dan
+     * redirect ke halaman login. Jika service gagal (mis. file foto struk tidak
+     * bisa dihapus → transaction rollback), ditangkap & ditunjukkan error informatif.
      *
-     * @param \Filament\Actions\Action $action Aksi mounted yang sedang jalan —
+     * @param \Filament\Actions\Action $action Aksi yang sedang dijalankan —
      *        data form validasi didapat via getData().
      */
     protected function processDeleteAccount(Action $action): void
     {
         $data = $action->getData();
+
+        // Rate limiting: mencegah brute-force password via modal (audit #4).
+        // Login=5/60s, Register=2/60s; deleteAccount sekarang rateLimit(3).
+        try {
+            $this->rateLimit(3);
+        } catch (TooManyRequestsException $e) {
+            Notification::make()
+                ->title('Terlalu banyak percobaan')
+                ->body('Anda telah mencoba menghapus akun terlalu banyak kali. Silakan coba lagi nanti.')
+                ->danger()
+                ->send();
+
+            return;
+        }
 
         // Safety net: cek ulang kredensial identik dengan rule form, agar
         // service TIDAK PERNAH jalan tanpa konfirmasi email + password persis.
@@ -227,7 +252,27 @@ class EditProfile extends BaseEditProfile
         session()->invalidate();
         session()->regenerateToken();
 
-        app(DeleteUserAccountService::class)->delete($user);
+        try {
+            app(DeleteUserAccountService::class)->delete($user);
+        } catch (\Throwable $e) {
+            // Jika service gagal (mis. file foto struk tidak bisa dihapus →
+            // DB transaction rollback), jangan biarkan user lihat error 500.
+            // Log error, tampilkan pesan informatif, dan redirect ke login.
+            Log::error('Gagal menghapus akun pengguna', [
+                'user_id' => $user?->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            Notification::make()
+                ->title('Gagal menghapus akun')
+                ->body('Terjadi kesalahan teknis saat menghapus akun. Data Anda tetap aman dan belum terhapus. Silakan coba lagi nanti.')
+                ->danger()
+                ->send();
+
+            $this->redirect(Filament::hasLogin() ? Filament::getLoginUrl() : Filament::getUrl());
+
+            return;
+        }
 
         Notification::make()
             ->title('Akun Anda berhasil dihapus')
