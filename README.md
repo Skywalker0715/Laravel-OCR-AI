@@ -58,6 +58,16 @@ flowchart TD
 - Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
 - Ekstensi `pcntl` (khusus Linux/Mac, **opsional**) — hanya dibutuhkan slot `logs` pada `composer run dev` (Laravel Pail); di Windows slot ini otomatis dilewati
 
+## Cara Mendapatkan Cohere API Key (Opsional)
+
+1. Buka https://dashboard.cohere.com dan daftar akun (bisa pakai Google/GitHub, gratis, tidak perlu kartu kredit).
+2. Setelah login, buka menu "API Keys" di sidebar kiri.
+3. Cohere otomatis membuatkan 1 Trial Key gratis (label "default") — copy key ini.
+4. Trial Key ini GRATIS 100%, cukup untuk 1.000 panggilan API per bulan, cocok untuk penggunaan personal/testing. **CATATAN PENTING:** Trial Key TIDAK BOLEH dipakai untuk aplikasi komersial/production dengan banyak user — untuk itu perlu upgrade ke Production Key berbayar (lihat cohere.com/pricing untuk detail biaya).
+5. Paste key yang sudah di-copy ke file .env, isi variabel `COHERE_API_KEY=<key_kamu_disini>`.
+6. **PENTING:** jangan pernah share/commit file `.env` ke manapun (sudah otomatis di-gitignore oleh project ini) — API key itu bersifat rahasia seperti password.
+7. Kalau tidak ingin pakai Cohere sama sekali, aplikasi tetap bisa berjalan normal memakai parser fallback regex bawaan (tanpa AI), cukup biarkan `COHERE_API_KEY` kosong di `.env`.
+
 ## 📦 Instalasi
 
 1. Clone repo lalu install dependency:
