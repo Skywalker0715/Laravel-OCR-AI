@@ -85,6 +85,35 @@ class Category extends Model
         });
     }
 
+    /** Semua personalisasi tampilan kategori ini. */
+    public function appearanceOverrides(): HasMany
+    {
+        return $this->hasMany(CategoryAppearanceOverride::class);
+    }
+
+    /** Ikon yang seharusnya dilihat oleh user tertentu. */
+    public function displayIconFor(User $user): ?string
+    {
+        return $this->appearanceOverrideFor($user)?->icon ?? $this->icon;
+    }
+
+    /** Warna yang seharusnya dilihat oleh user tertentu. */
+    public function displayColorFor(User $user): ?string
+    {
+        return $this->appearanceOverrideFor($user)?->color ?? $this->color;
+    }
+
+    private function appearanceOverrideFor(User $user): ?CategoryAppearanceOverride
+    {
+        if ($this->relationLoaded('appearanceOverrides')) {
+            return $this->appearanceOverrides->firstWhere('user_id', $user->getKey());
+        }
+
+        return $this->appearanceOverrides()
+            ->where('user_id', $user->getKey())
+            ->first();
+    }
+
     /**
      * Tebak nama kategori kanonik dari sebuah label/teks. Fungsi murni (tanpa DB),
      * aman dipakai AIParserService untuk jalur AI maupun fallback regex;

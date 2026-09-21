@@ -158,7 +158,14 @@ PROMPT;
                 'model' => $model,
                 'message' => $prompt,
                 'max_tokens' => 1000,
-                'temperature' => 0.1,
+                // DETERMINISM FIX: temperature = 0 (greedy decoding) agar ekstraksi
+                // data terstruktur SELALU konsisten untuk teks OCR yang sama. Nilai
+                // sebelumnya 0.1 masih memungkinkan model menghasilkan output BERBEDA
+                // pada setiap pemanggilan (mis. struk SECURE PARK berubah 17.000 ->
+                // 29.000 -> 41.000 dari note yang sama). Untuk task parsing terstruktur
+                // kita butuh hasil paling pasti, bukan "kreatif". top_p tidak diset
+                // karena saat temperature=0 model sudah tidak melakukan sampling.
+                'temperature' => 0.0,
             ]);
 
         if (! $response->successful()) {

@@ -22,6 +22,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 - **Multi-user** - setiap user hanya melihat data miliknya (global scope `OwnedByUserScope`).
 - **Notifikasi parsing** - hasil parsing (sukses / estimasi / gagal-total) dikirim ke database notification berisi link "Periksa & Edit".
 - **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan).
+- **Tanya AI** - widget chat di Dashboard untuk bertanya tentang pengeluaran pakai bahasa natural (contoh: "Berapa total pengeluaran saya?", "Kategori apa paling boros?"). Data expense (90 hari) dirangkum lalu dikirim ke Cohere dengan system prompt ketat agar tidak ngarang angka. Rate limit 10 pertanyaan/user/hari. History 3 pertanyaan terakhir tersimpan di tabel `ai_insight_queries`.
 
 ## Cara Kerja
 
@@ -43,7 +44,7 @@ flowchart TD
 - Filament v4 (panel admin)
 - PostgreSQL
 - Tesseract OCR (`thiagoalessio/tesseract_ocr`)
-- Cohere API (parsing AI); model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal)
+- Cohere API (parsing AI + fitur Tanya AI); model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal). Fitur Tanya AI bisa pakai model berbeda lewat `COHERE_INSIGHT_MODEL`.
 - GD (kompresi / pra-proses gambar)
 - `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
 - Pest (testing)
@@ -118,7 +119,7 @@ flowchart TD
 | Slot | Proses | Fungsi |
 |------|--------|--------|
 | `server` | `php artisan serve` | HTTP server di `http://127.0.0.1:8000` |
-| `queue` | `php artisan queue:listen --tries=1` | Worker antrian **WAJIB** (memproses OCR/AI parsing) |
+| `queue` | `php artisan queue:work --tries=1` | Worker antrian **WAJIB** (memproses OCR/AI parsing) |
 | `logs` | `php artisan dev:logs` | Log viewer real-time (meneruskan ke `php artisan pail`) |
 | `vite` | `npm run dev` | Asset build hot-reload di `http://localhost:5173` |
 
@@ -129,6 +130,15 @@ composer run dev
 - **Windows/Laragon** — langsung jalan. Slot `logs` otomatis menampilkan peringatan bahwa **Pail butuh ekstensi `pcntl`** (tidak tersedia di PHP Windows) lalu berhenti bersih (exit 0) tanpa memengaruhi slot lain.
 - **Linux/Mac** — slot `logs` otomatis menjalankan `php artisan pail` bila ekstensi `pcntl` tersedia.
 - Tekan `Ctrl+C` untuk menghentikan seluruh layanan sekaligus.
+
+> **Catatan pengembangan:** slot queue memakai `queue:work`, sehingga proses PHP
+> worker tetap hidup dan dapat mengambil job berikutnya tanpa bootstrap framework
+> ulang. Ini membantu respons job pertama, terutama di Windows. Konsekuensinya,
+> perubahan pada `app/Jobs` atau `app/Services` yang dipakai parsing tidak terbaca
+> otomatis oleh worker yang sedang berjalan. Setelah mengubah kode tersebut,
+> hentikan lalu jalankan kembali `composer run dev` (atau jalankan
+> `php artisan queue:restart`). Untuk penggunaan aplikasi sehari-hari, tidak ada
+> langkah tambahan: pengguna cukup mengunggah struk seperti biasa.
 
 ### Cara Manual (Alternatif/Fallback)
 

@@ -9,6 +9,8 @@ use App\Models\User;
 use App\Services\AIParserService;
 use App\Services\Helper;
 use App\Services\OCRService;
+use App\Services\Parsing\AdjustmentLinesExplainer;
+use App\Services\Parsing\ItemHallucinationDetector;
 use App\Support\MoneyFormatter;
 use Filament\Actions\Action;
 use Filament\Notifications\Notification;
@@ -114,6 +116,16 @@ class AIParserJob implements ShouldQueue
         $lines = array_values(array_filter(array_map('trim', explode("\n", $note))));
         $items = $parsed['items'] ?? [];
 
+        // 2b) Deteksi item kemungkinan halusinasi (nama item tidak ditemukan di
+        // teks OCR, atau ditemukan tapi tidak berdampingan dengan nominalnya).
+        // Dipakai Guard Total di bawah: bila mayoritas item halusinasi DAN ada
+        // baris total FINAL eksplisit, nilai eksplisit menang atas hasil AI
+        // walau "konsisten dengan penjumlahan item" — item-nya sendiri yang
+        // dibuat-buat (kasus SECURE PARK: AI menciptakan item "Parkir Mobil"
+        // dari header tiket + baris tarif, total AI 29.000 vs TOTAL BAYAR 17.000).
+        $itemsPossiblyHallucinated = app(ItemHallucinationDetector::class)
+            ->itemsPossiblyHallucinated($items, $lines);
+
         // 2) Guard Total (jalur AI & fallback) — struk dengan diskon punya
         //    beberapa kandidat total ("Jumlah" sebelum diskon vs "TOTAL BAYAR"
         //    sesudah diskon) dan AI kadang memilih pra-diskon. Lapisan validasi
@@ -127,7 +139,13 @@ class AIParserJob implements ShouldQueue
 
         $explicitFinalTotal = $this->extractExplicitFinalTotal($lines);
         if ($explicitFinalTotal !== null) {
-            if ($this->explicitTotalOverrideJustified($amount, $items, $explicitFinalTotal['value'], $lines)) {
+            if ($this->explicitTotalOverrideJustified(
+                $amount,
+                $items,
+                $explicitFinalTotal['value'],
+                $lines,
+                $itemsPossiblyHallucinated
+            )) {
                 if (abs($explicitFinalTotal['value'] - $amount) > 0.01) {
                     Log::warning(sprintf(
                         'Guard Total (record %d): baris total final eksplisit "%s" = %.2f dipakai menggantikan nilai parsing %.2f (kandidat total pra-diskon atau kosong).',
@@ -417,17 +435,22 @@ class AIParserJob implements ShouldQueue
      *     biasanya AI menangkap baris "Jumlah" pra-diskon — kasus struk laundry);
      *  3. parsing didukung item, tetapi selisihnya ke nilai eksplisit dijelaskan
      *     baris diskon/biaya (mis. "Diskon Member 10% -Rp 6.600" menjelaskan
-     *     66.000 → 59.400).
+     *     66.000 → 59.400);
+     *  4. mayoritas item kemungkinan HALUSINASI (lihat ItemHallucinationDetector)
+     *     — walau penjumlahan item "mendukung" nilai parsing, item-nya sendiri
+     *     dibuat AI (kasus SECURE PARK: item "Parkir Mobil" + tarif → 29.000
+     *     padahal TOTAL BAYAR eksplisit 17.000). Nilai eksplisit dipercaya.
      *
      * Bila parsing didukung penjumlahan item DAN selisih tidak dijelaskan baris
-     * apapun, label eksplisit kemungkinan salah baca OCR (kasus BNI: "TOTAL
-     * BAYAR Rp 148.975" padahal item berjumlah tepat 146.975) — parsing
-     * dipertahankan dan mismatch hanya dilaporkan ke log.
+     * apapun DAN item tidak halusinasi, label eksplisit kemungkinan salah baca
+     * OCR (kasus BNI: "TOTAL BAYAR Rp 148.975" padahal item berjumlah tepat
+     * 146.975) — parsing dipertahankan dan mismatch hanya dilaporkan ke log.
      *
      * @param  array<int, array<string, mixed>>  $items  Item hasil parsing.
      * @param  array<int, string>  $lines  Baris teks OCR yang sudah di-trim.
+     * @param  bool  $itemsPossiblyHallucinated  Mayoritas item terdeteksi halusinasi.
      */
-    private function explicitTotalOverrideJustified(float $parsedTotal, array $items, float $explicitValue, array $lines): bool
+    private function explicitTotalOverrideJustified(float $parsedTotal, array $items, float $explicitValue, array $lines, bool $itemsPossiblyHallucinated = false): bool
     {
         if ($parsedTotal <= 0) {
             return true;
@@ -443,9 +466,25 @@ class AIParserJob implements ShouldQueue
             return true;
         }
 
-        return $this->differenceExplainedByAdjustmentLine(
-            abs($explicitValue - $parsedTotal),
-            $parsedTotal,
+        // Item kemungkinan halusinasi: penjumlahan item yang "mendukung" nilai
+        // parsing tidak bisa dipercaya — item-nya dibuat AI. Baris total final
+        // eksplisit yang jelas lebih dipercaya (kasus SECURE PARK).
+        if ($itemsPossiblyHallucinated) {
+            Log::warning(sprintf(
+                'Guard Total (item diduga halusinasi): nilai parsing %.2f konsisten dengan penjumlahan item hasil AI, tetapi mayoritas item kemungkinan dibuat AI — baris total final eksplisit %.2f dipakai.',
+                $parsedTotal,
+                $explicitValue,
+            ));
+
+            return true;
+        }
+
+        // Gap bertanda: dari nilai parsing (≈ penjumlahan item pra-diskon/pajak)
+        // menuju nilai eksplisit. Layak menimpa bila gap dijelaskan baris-baris
+        // penyesuai — bisa kombinasi BEBERAPA baris sekaligus (mis. PPN + diskon).
+        return app(AdjustmentLinesExplainer::class)->isGapExplained(
+            $explicitValue - $parsedTotal,
+            $itemSum,
             $lines
         );
     }
@@ -499,13 +538,19 @@ class AIParserJob implements ShouldQueue
             return false;
         }
 
-        // Selisih dijelaskan pola yang dikenali (diskon/PPN/biaya)? Toleransi
-        // residual memakai ambang absolut flag: baris penjelasan tidak harus
-        // persis sama dengan selisih, sisa selisih <= ambang (atau 1% dari
-        // total, mana yang lebih besar) masih dianggap noise pembacaan item.
-        $baseAmount = max($amount, $itemSum);
-        $residualTolerance = max(self::MISMATCH_DIFF_ABSOLUTE, 0.01 * $baseAmount);
-        if ($this->differenceExplainedByAdjustmentLine($diff, $baseAmount, $lines, $residualTolerance)) {
+        // Selisih dijelaskan pola yang dikenali? Toleransi residual memakai
+        // ambang absolut flag: baris penjelasan tidak harus persis sama dengan
+        // selisih, sisa selisih <= ambang (atau 1% dari total, mana yang lebih
+        // besar) masih dianggap noise pembacaan item. Gap bertanda dipakai agar
+        // arah (total lebih besar vs lebih kecil dari item) konsisten dengan
+        // kontribusi baris penyesuai (pajak menambah, diskon mengurangi).
+        $residualTolerance = max(self::MISMATCH_DIFF_ABSOLUTE, 0.01 * max($amount, $itemSum));
+        if (app(AdjustmentLinesExplainer::class)->isGapExplained(
+            $amount - $itemSum,
+            $itemSum,
+            $lines,
+            $residualTolerance
+        )) {
             return false;
         }
 
@@ -519,52 +564,6 @@ class AIParserJob implements ShouldQueue
         ));
 
         return true;
-    }
-
-    /**
-     * True bila selisih antara dua kandidat total dijelaskan oleh baris
-     * diskon/biaya di teks struk — selisih cocok dengan nominal di baris
-     * tersebut (mis. "-Rp 6.600") atau dengan persentase diskon terhadap
-     * total pra-diskon (mis. "Diskon 10%" dari 66.000 = 6.600). False bila
-     * selisih tidak punya penjelasan, yang menandakan salah satu kandidat
-     * salah baca OCR.
-     *
-     * @param  float  $tolerance  Toleransi kecocokan nominal baris terhadap
-     *                            selisih (default 0.01 = harus persis, dipakai
-     *                            Guard Total; deteksi mismatch item memakai
-     *                            toleransi lebih besar untuk residual noise).
-     * @param  array<int, string>  $lines
-     */
-    private function differenceExplainedByAdjustmentLine(float $diff, float $baseAmount, array $lines, float $tolerance = 0.01): bool
-    {
-        if ($diff <= 0.01) {
-            return true;
-        }
-
-        $adjustmentPattern = '/disc|diskon|potong|hemat|rabat|biaya|admin|ongkir|ongkos|service|charge|fee|pajak|tax|ppn/iu';
-
-        foreach ($lines as $line) {
-            if (preg_match($adjustmentPattern, $line) !== 1) {
-                continue;
-            }
-
-            // Nominal eksplisit di baris diskon/biaya (mis. "Diskon ... -Rp 6.600").
-            $number = $this->helper->extractLargestNumber($line);
-            if ($number > 0 && abs($number - $diff) <= $tolerance) {
-                return true;
-            }
-
-            // Persentase diskon (mis. "Diskon Member 10%") terhadap total
-            // pra-diskon; toleransi minimum Rp 1 untuk pembulatan.
-            if (preg_match('/(\d+(?:[.,]\d+)?)\s*%/u', $line, $m) === 1) {
-                $percent = (float) str_replace(',', '.', $m[1]);
-                if (abs($baseAmount * $percent / 100 - $diff) <= max(1.0, $tolerance)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     /**

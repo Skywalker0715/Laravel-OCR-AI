@@ -16,6 +16,7 @@ class Dashboard extends BaseDashboard
             \App\Filament\Widgets\StatsOverview::class,
             \App\Filament\Widgets\ExpenseLineChart::class,
             \App\Filament\Widgets\CategoryChart::class,
+            \App\Filament\Widgets\AiInsightChatWidget::class,
         ];
     }
 

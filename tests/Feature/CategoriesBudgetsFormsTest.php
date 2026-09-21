@@ -6,8 +6,10 @@ use App\Filament\Resources\Budgets\Pages\EditBudget;
 use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\Categories\Pages\CreateCategory;
 use App\Filament\Resources\Categories\Pages\EditCategory;
+use App\Filament\Resources\Categories\Pages\ListCategories;
 use App\Models\Budget;
 use App\Models\Category;
+use App\Models\CategoryAppearanceOverride;
 use App\Models\User;
 use Filament\Support\Icons\Heroicon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -312,7 +314,7 @@ test('judul record Budget informatif untuk breadcrumb & judul halaman (konsisten
  * diedit/dihapus oleh siapa pun, termasuk user lain yang sedang login.
  */
 
-test('kategori default sistem tidak bisa diedit maupun dihapus oleh user manapun', function () {
+test('kategori bawaan membuka edit tampilan tetapi delete tetap terkunci', function () {
     $user = User::factory()->create();
     $this->actingAs($user);
 
@@ -320,14 +322,54 @@ test('kategori default sistem tidak bisa diedit maupun dihapus oleh user manapun
     $default = Category::create(['name' => 'Default Uji', 'icon' => 'o-film', 'color' => '#8B5CF6']);
     expect($default->user_id)->toBeNull();
 
-    expect(CategoryResource::canEdit($default))->toBeFalse();
+    expect(CategoryResource::canEdit($default))->toBeTrue();
     expect(CategoryResource::canDelete($default))->toBeFalse();
 
     // Halaman Edit menolak akses URL langsung: EditRecord::mount →
     // authorizeAccess() → abort 403. Diuji lewat request HTTP penuh agar
     // meniru persis skenario penyalahgunaan link/ID dari notifikasi.
-    $this->get("/admin/categories/{$default->getKey()}/edit")
-        ->assertForbidden();
+    expect(CategoryResource::canDelete($default))->toBeFalse();
+});
+
+test('override tampilan kategori bawaan terisolasi per user dan dapat direset', function () {
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $default = Category::create(['name' => 'Kesehatan', 'icon' => 'o-heart', 'color' => '#EF4444']);
+
+    $this->actingAs($userA);
+
+    Livewire::test(EditCategory::class, ['record' => $default->getKey()])
+        ->fillForm([
+            'name' => 'Tidak Boleh Berubah',
+            'icon' => Heroicon::OutlinedGift->value,
+            'color' => '#2563EB',
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    $default->refresh();
+    expect($default->name)->toBe('Kesehatan')
+        ->and($default->icon)->toBe('o-heart')
+        ->and($default->color)->toBe('#EF4444')
+        ->and($default->displayIconFor($userA))->toBe('o-gift')
+        ->and($default->displayColorFor($userA))->toBe('#2563EB')
+        ->and($default->displayColorFor($userB))->toBe('#EF4444');
+
+    Livewire::test(ListCategories::class)
+        ->assertSee('#2563EB');
+
+    $this->actingAs($userB);
+
+    Livewire::test(ListCategories::class)
+        ->assertSee('#EF4444')
+        ->assertDontSee('#2563EB');
+
+    CategoryAppearanceOverride::query()
+        ->where('user_id', $userA->id)
+        ->where('category_id', $default->id)
+        ->delete();
+
+    expect($default->fresh()->displayColorFor($userA))->toBe('#EF4444');
 });
 
 test('kategori milik user tetap bisa diedit & dihapus', function () {

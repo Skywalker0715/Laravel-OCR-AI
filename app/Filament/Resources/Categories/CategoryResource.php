@@ -135,6 +135,8 @@ class CategoryResource extends Resource
                             ->maxLength(255)
                             ->label('Nama Kategori')
                             ->placeholder('cth. Makanan & Minuman')
+                            ->disabled(fn (string $operation, ?Category $record): bool => $operation === 'edit'
+                                && $record?->user_id === null)
                             ->columnSpanFull(),
 
                         Select::make('icon')
@@ -158,6 +160,9 @@ class CategoryResource extends Resource
             ->columns([
                 IconColumn::make('icon')
                     ->label('Ikon')
+                    ->getStateUsing(fn (Category $record): ?string => Auth::user() instanceof \App\Models\User
+                        ? $record->displayIconFor(Auth::user())
+                        : $record->icon)
                     ->icon(fn (string $state): ?Heroicon => filled($state) ? Heroicon::tryFrom($state) : Heroicon::OutlinedTag)
                     ->color('primary'),
 
@@ -171,6 +176,9 @@ class CategoryResource extends Resource
                 // menyalin kode warna ke clipboard.
                 ColorColumn::make('color')
                     ->label('Warna')
+                    ->getStateUsing(fn (Category $record): ?string => Auth::user() instanceof \App\Models\User
+                        ? $record->displayColorFor(Auth::user())
+                        : $record->color)
                     ->tooltip(fn (?string $state): ?string => filled($state) ? strtoupper($state) : null)
                     ->copyable()
                     ->copyMessage('Kode warna disalin')
@@ -183,8 +191,10 @@ class CategoryResource extends Resource
                 // "color_hex" yang state-nya diisi manual dari kolom color.
                 TextColumn::make('color_hex')
                     ->label('Kode Hex')
-                    ->getStateUsing(fn (Category $record): string => filled($record->color)
-                        ? strtoupper($record->color)
+                    ->getStateUsing(fn (Category $record): string => filled($color = (Auth::user() instanceof \App\Models\User
+                        ? $record->displayColorFor(Auth::user())
+                        : $record->color))
+                        ? strtoupper($color)
                         : '—')
                     ->color('gray'),
 
@@ -202,8 +212,7 @@ class CategoryResource extends Resource
             // disembunyikan; guard keras di getEdit/DeleteAuthorizationResponse().
             ->recordActions([
                 ViewAction::make(),
-                EditAction::make()
-                    ->visible(fn (Category $record): bool => $record->user_id !== null),
+                EditAction::make(),
                 DeleteAction::make()
                     ->visible(fn (Category $record): bool => $record->user_id !== null),
             ])
@@ -241,10 +250,16 @@ class CategoryResource extends Resource
                             ->weight(FontWeight::SemiBold),
                         IconEntry::make('icon')
                             ->label('Ikon')
+                            ->state(fn (Category $record): ?string => Auth::user() instanceof \App\Models\User
+                                ? $record->displayIconFor(Auth::user())
+                                : $record->icon)
                             ->color('primary')
                             ->placeholder('—'),
                         ColorEntry::make('color')
                             ->label('Warna')
+                            ->state(fn (Category $record): ?string => Auth::user() instanceof \App\Models\User
+                                ? $record->displayColorFor(Auth::user())
+                                : $record->color)
                             ->copyable()
                             ->copyMessage('Kode warna disalin')
                             ->placeholder('—'),
@@ -349,16 +364,11 @@ class CategoryResource extends Resource
     }
 
     /**
-     * Kategori default sistem (user_id NULL) read-only untuk semua user; kedua
-     * method ini adalah satu-satunya titik otorisasi Filament v4 yang perlu
-     * di-override (visibility action, hard-check halaman Edit, dan bulk delete).
+     * Kategori default sistem boleh dibuka pada halaman Edit hanya untuk menyimpan
+     * override ikon/warna milik user; nama tetap dikunci oleh form/page.
      */
     public static function getEditAuthorizationResponse(Model $record): Response
     {
-        if ($record->user_id === null) {
-            return Response::deny('Kategori default sistem bersifat read-only dan tidak dapat diubah.');
-        }
-
         return parent::getEditAuthorizationResponse($record);
     }
 

@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Budgets\Tables;
 
 use App\Models\Budget;
+use App\Models\User;
 use App\Support\MoneyFormatter;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteAction;
@@ -20,7 +21,9 @@ class BudgetsTable
                 TextColumn::make('category.name')
                     ->label('Kategori')
                     ->badge()
-                    ->color(fn (mixed $record) => $record->category?->color ?? 'gray')
+                    ->color(fn (mixed $record) => auth()->user() instanceof User
+                        ? $record->category?->displayColorFor(auth()->user()) ?? 'gray'
+                        : $record->category?->color ?? 'gray')
                     ->placeholder('Semua kategori')
                     ->sortable(),
 

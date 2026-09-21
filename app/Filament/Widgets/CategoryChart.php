@@ -31,7 +31,11 @@ class CategoryChart extends ChartWidget
 
         // Muat semua kategori sekaligus (hindari N+1) untuk nama & warna irisan.
         $ids = $rows->pluck('category_key')->filter()->unique()->values()->all();
-        $categories = Category::query()->whereIn('id', $ids)->get()->keyBy('id');
+        $categories = Category::query()
+            ->whereIn('id', $ids)
+            ->with(['appearanceOverrides' => fn ($query) => $query->where('user_id', auth()->id())])
+            ->get()
+            ->keyBy('id');
 
         $labels = [];
         $values = [];
@@ -42,7 +46,9 @@ class CategoryChart extends ChartWidget
 
             if ($category) {
                 $labels[] = $category->name;
-                $colors[] = $category->color ?? '#CBD5E1';
+                $colors[] = auth()->user() instanceof \App\Models\User
+                    ? $category->displayColorFor(auth()->user()) ?? '#CBD5E1'
+                    : $category->color ?? '#CBD5E1';
             } else {
                 $labels[] = 'Tanpa Kategori';
                 $colors[] = '#CBD5E1';

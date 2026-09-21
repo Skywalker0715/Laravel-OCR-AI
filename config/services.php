@@ -42,6 +42,9 @@ return [
         // lewat .env (COHERE_MODEL) bila inginkan model lain. Lihat
         // https://docs.cohere.com/docs/models
         'model' => env('COHERE_MODEL', 'command-r7b-12-2024'),
+        // Model opsional khusus untuk fitur "Tanya AI" (FinancialInsightService).
+        // Bisa berbeda dari model parsing struk. Kosong = pakai COHERE_MODEL.
+        'insight_model' => env('COHERE_INSIGHT_MODEL'),
     ],
 
 ];

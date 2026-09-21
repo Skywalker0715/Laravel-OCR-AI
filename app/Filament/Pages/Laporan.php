@@ -9,6 +9,7 @@ use App\Filament\Widgets\LaporanStatsOverview;
 use App\Models\Budget;
 use App\Models\Category;
 use App\Models\Expense;
+use App\Models\User;
 use App\Support\MoneyFormatter;
 use App\Support\ReportFilter;
 use BackedEnum;
@@ -240,7 +241,9 @@ class Laporan extends Page implements HasTable
                 TextColumn::make('category.name')
                     ->label('Kategori')
                     ->badge()
-                    ->color(fn (mixed $record) => $record->category?->color ?? 'gray')
+                    ->color(fn (mixed $record) => auth()->user() instanceof User
+                        ? $record->category?->displayColorFor(auth()->user()) ?? 'gray'
+                        : $record->category?->color ?? 'gray')
                     ->placeholder('Tanpa kategori')
                     ->sortable(),
 
@@ -418,7 +421,9 @@ class Laporan extends Page implements HasTable
             ->groupBy(fn (Expense $expense): int => (int) $expense->category_id)
             ->map(fn (Collection $group): array => [
                 'name' => $group->first()->category?->name ?? 'Tanpa Kategori',
-                'color' => $group->first()->category?->color ?? '#CBD5E1',
+                'color' => auth()->user() instanceof User
+                    ? $group->first()->category?->displayColorFor(auth()->user()) ?? '#CBD5E1'
+                    : $group->first()->category?->color ?? '#CBD5E1',
                 'count' => $group->count(),
                 'total' => (float) $group->sum('amount'),
             ])
