@@ -169,6 +169,17 @@
         border-inline-end: 1px solid #e5e7eb;
     }
 
+    /* Sidebar tetap bisa digulir saat item menu melebihi tinggi layar,
+       tetapi scrollbar dan tombol panahnya tidak ditampilkan. */
+    .fi-sidebar-nav {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+    }
+
+    .fi-sidebar-nav::-webkit-scrollbar {
+        display: none;
+    }
+
     html.dark .fi-main-sidebar {
         border-inline-end: 1px solid #3f3f46;
     }
