@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Budgets\Schemas;
 
 use App\Models\Budget;
 use App\Models\Category;
+use App\Support\MoneyFormatter;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Schemas\Components\Section;
@@ -34,7 +35,7 @@ class BudgetForm
                             ->options(fn (): array => Category::query()
                                 ->where(function (Builder $query): void {
                                     $query->whereNull('user_id')
-                                          ->orWhere('user_id', Auth::id());
+                                        ->orWhere('user_id', Auth::id());
                                 })
                                 ->orderBy('name')
                                 ->pluck('name', 'id')
@@ -44,10 +45,10 @@ class BudgetForm
                             ->nullable()
                             ->placeholder('Semua kategori')
                             ->columnSpan(1),
-                            // Filter opsi kategori: hanya tampilkan kategori default
-                            // sistem (user_id NULL) dan kategori milik user login.
-                            // Pola sama dengan ExpenseForm — tanpa scope, model Category
-                            // tanpa OwnedByUserScope akan menampilkan kategori milik user lain.
+                        // Filter opsi kategori: hanya tampilkan kategori default
+                        // sistem (user_id NULL) dan kategori milik user login.
+                        // Pola sama dengan ExpenseForm — tanpa scope, model Category
+                        // tanpa OwnedByUserScope akan menampilkan kategori milik user lain.
 
                         TextInput::make('amount')
                             ->label('Jumlah Anggaran')
@@ -55,6 +56,15 @@ class BudgetForm
                             ->numeric()
                             ->prefix('Rp')
                             ->minValue(0)
+                            // Batas atas wajib ada di level form: kolom DB bernilai
+                            // decimal(15,2) dan sebelum ini user bisa mengetik nominal
+                            // berapa pun, lalu PostgreSQL melempar SQLSTATE[22003]
+                            // "numeric field overflow" saat menyimpan (nominal besar
+                            // ala UMKM seperti 300 juta / 3 miliar ikut gagal).
+                            ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                            ->validationMessages([
+                                'max' => MoneyFormatter::maxInputMessage(),
+                            ])
                             ->placeholder('cth. 2000000')
                             ->columnSpan(1),
 

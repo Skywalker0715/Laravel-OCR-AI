@@ -45,6 +45,8 @@ return [
         // Model opsional khusus untuk fitur "Tanya AI" (FinancialInsightService).
         // Bisa berbeda dari model parsing struk. Kosong = pakai COHERE_MODEL.
         'insight_model' => env('COHERE_INSIGHT_MODEL'),
+        // Batas harian pertanyaan Tanya AI per user (default 10).
+        'daily_limit' => (int) env('AI_INSIGHT_DAILY_LIMIT', 10),
     ],
 
 ];

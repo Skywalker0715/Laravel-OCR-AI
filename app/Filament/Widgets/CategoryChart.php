@@ -12,6 +12,13 @@ use Filament\Widgets\ChartWidget;
  */
 class CategoryChart extends ChartWidget
 {
+    /**
+     * Grid Dashboard memakai 6 kolom (lihat Dashboard::getColumns()): grafik
+     * mengambil 3/6 = 1/2 lebar agar tetap berdampingan 50:50 dengan
+     * ExpenseLineChart seperti sebelumnya. Di bawah lg (grid 1 kolom) span = 1.
+     */
+    protected int | string | array $columnSpan = ['default' => 1, 'lg' => 3];
+
     protected ?string $heading = 'Pengeluaran per Kategori';
 
     protected function getType(): string

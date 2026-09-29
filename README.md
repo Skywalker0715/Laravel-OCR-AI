@@ -1,4 +1,4 @@
-﻿# Catatan Belanja - Aplikasi Pencatat Pengeluaran Berbasis OCR + AI
+﻿# Catatan Belanja - Aplikasi Pencatat Keuangan Berbasis OCR + AI
 
 ![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?logo=laravel&logoColor=white)
 ![PHP](https://img.shields.io/badge/PHP-8.2%2B-777BB4?logo=php&logoColor=white)
@@ -6,7 +6,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13%2B-4169E1?logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-10B981)
 
-Aplikasi web untuk mencatat pengeluaran dari foto struk belanja: unggah foto struk, teks dibaca otomatis (OCR Tesseract), lalu di-parsing menjadi data terstruktur (vendor, tanggal, kategori, item, total, kembalian) oleh AI (Cohere) dengan fallback regex bila API gagal. Hasilnya tersimpan di PostgreSQL dan dikelola lewat panel admin Filament.
+Aplikasi web untuk mencatat **keuangan secara lengkap** - bukan hanya pengeluaran. Unggah foto struk belanja: teks dibaca otomatis (OCR Tesseract), lalu di-parsing menjadi data terstruktur (vendor, tanggal, kategori, item, total, kembalian) oleh AI (Cohere) dengan fallback regex bila API gagal. Selain pengeluaran, aplikasi ini juga mencatat **pemasukan (income)**, **utang piutang** beserta status pelunasannya, menyajikan laporan **kas arus** (pemasukan vs pengeluaran), dan menyediakan asisten **Tanya AI** untuk tanya-jawab keuangan. Semua data tersimpan di PostgreSQL dan dikelola lewat panel admin Filament.
 
 Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-user, kategori pengeluaran usaha).
 
@@ -14,15 +14,18 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 
 - **Upload struk + OCR** - Tesseract OCR (bahasa Indonesia + Inggris), kompresi gambar otomatis (GD) sebelum diproses.
 - **Parsing AI + fallback** - Cohere mengubah teks OCR menjadi JSON terstruktur; bila API gagal atau tidak ada key, parser regex bawaan mengambil alih otomatis. Jalur parsing (AI / estimasi) tampil di halaman detail.
-- **Panel admin Filament v4** - CRUD Expenses (beserta item belanja), Categories, dan Budgets; preview foto, badge status parsing, polling otomatis hasil parsing, tombol "Proses Ulang OCR & AI".
+- **Panel admin Filament v4** - CRUD Expenses (beserta item belanja), Incomes, Debts (utang piutang), Categories, dan Budgets; preview foto, badge status parsing, polling otomatis hasil parsing, tombol "Proses Ulang OCR & AI".
+- **Pemasukan (Income)** - catat uang masuk (gaji, penjualan, komisi, dsb.) dengan sumber, nominal, tanggal diterima, dan catatan; CRUD penuh di panel plus kartu "Total Pemasukan" di Dashboard.
+- **Utang Piutang** - catat utang (uang yang kita pinjam) dan piutang (uang yang kita pinjamkan) dengan nama pihak, nominal, dan jatuh tempo. **Status pelunasan terhitung otomatis** (Belum Lunas / Sebagian / Lunas) dari nominal yang sudah terbayar, plus aksi "Tandai Lunas" & "Catat Pembayaran Sebagian", kartu Total Utang/Piutang Aktif di Dashboard, dan export Excel & PDF.
 - **Kategori** - kategori default sistem (dipakai bersama semua user, read-only) + kategori pribadi per user; tebakan kategori otomatis dari vendor/item.
 - **Budget bulanan + notifikasi** - anggaran per kategori atau umum per bulan; notifikasi otomatis saat pemakaian menyentuh 90% dan 100% (masing-masing sekali per periode) lewat lonceng notifikasi database Filament.
 - **Halaman Laporan** - filter rentang tanggal / bulan + multi-kategori, ringkasan, grafik kategori, export **Excel (.xlsx)** dan **PDF**.
+- **Kas Arus** - halaman laporan arus kas: ringkasan **Total Pemasukan**, **Total Pengeluaran**, dan **Saldo**, grafik batang pemasukan vs pengeluaran per bulan, serta tabel breakdown per bulan. Mengikuti filter periode (rentang tanggal / bulan) dengan export **Excel (.xlsx)** dan **PDF**.
 - **Dashboard** - statistik total/jumlah/rata-rata + grafik garis riwayat pengeluaran.
 - **Multi-user** - setiap user hanya melihat data miliknya (global scope `OwnedByUserScope`).
 - **Notifikasi parsing** - hasil parsing (sukses / estimasi / gagal-total) dikirim ke database notification berisi link "Periksa & Edit".
 - **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan).
-- **Tanya AI** - widget chat di Dashboard untuk bertanya tentang pengeluaran pakai bahasa natural (contoh: "Berapa total pengeluaran saya?", "Kategori apa paling boros?"). Data expense (90 hari) dirangkum lalu dikirim ke Cohere dengan system prompt ketat agar tidak ngarang angka. Rate limit 10 pertanyaan/user/hari. History 3 pertanyaan terakhir tersimpan di tabel `ai_insight_queries`.
+- **Tanya AI** - tombol aksi di Dashboard untuk bertanya tentang keuangan pakai bahasa natural (contoh: "Berapa total pengeluaran saya?", "Kategori apa paling boros?", "Berapa sisa utang saya?"). Pertanyaan otomatis di-*retrieve* ke data yang relevan - periode, kategori, dan jenis data yang disebut dideteksi dari pertanyaannya - dan cakupannya meliputi **semua jenis data** (pengeluaran, pemasukan, serta utang & piutang). Ringkasan data itu baru dikirim ke Cohere dengan system prompt ketat agar tidak ngarang angka. Rate limit harian configurable lewat `AI_INSIGHT_DAILY_LIMIT` (default 10 pertanyaan/user/hari).
 
 ## Cara Kerja
 
@@ -44,7 +47,7 @@ flowchart TD
 - Filament v4 (panel admin)
 - PostgreSQL
 - Tesseract OCR (`thiagoalessio/tesseract_ocr`)
-- Cohere API (parsing AI + fitur Tanya AI); model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal). Fitur Tanya AI bisa pakai model berbeda lewat `COHERE_INSIGHT_MODEL`.
+- Cohere API - dipakai untuk **2 keperluan**: (1) **parsing struk** (teks hasil OCR -> JSON terstruktur) dan (2) fitur **Tanya AI** / insight keuangan (`FinancialInsightService`). Model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal). Fitur Tanya AI bisa memakai model berbeda lewat `COHERE_INSIGHT_MODEL`.
 - GD (kompresi / pra-proses gambar)
 - `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
 - Pest (testing)
@@ -57,6 +60,8 @@ flowchart TD
 - **Tesseract OCR** ter-install di server + language data **`ind` dan `eng`**
   (Windows: installer UB-Mannheim — pastikan mencentang kedua language pack, atau salin `ind.traineddata` & `eng.traineddata` ke `C:\Program Files\Tesseract-OCR\tessdata`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
 - Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
+  - Tanpa key: parsing struk tetap berjalan (fallback regex), sementara fitur **Tanya AI** butuh key untuk bisa menjawab.
+  - Fitur **Tanya AI**: `AI_INSIGHT_DAILY_LIMIT=10` (default) membatasi jumlah pertanyaan per user per hari, dan `COHERE_INSIGHT_MODEL` (opsional) memakai model lain khusus untuk Tanya AI - keduanya boleh dibiarkan default.
 - Ekstensi `pcntl` (khusus Linux/Mac, **opsional**) — hanya dibutuhkan slot `logs` pada `composer run dev` (Laravel Pail); di Windows slot ini otomatis dilewati
 
 ## Cara Mendapatkan Cohere API Key (Opsional)
@@ -90,6 +95,8 @@ flowchart TD
    DB_PASSWORD=...
    COHERE_API_KEY=      # opsional
    COHERE_MODEL=command-r7b-12-2024   # model AI parsing (default)
+   COHERE_INSIGHT_MODEL=              # model khusus fitur Tanya AI (opsional)
+   AI_INSIGHT_DAILY_LIMIT=10          # batas pertanyaan Tanya AI/user/hari (default 10)
    APP_DEBUG=false      # WAJIB false di production
    ```
    Kemudian generate app key:
@@ -188,9 +195,9 @@ Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifi
 
 ## 🔐 Catatan Keamanan untuk Pembeli/Developer
 
-- **Authorization via global scope, bukan Policy.** Aplikasi ini tidak memakai Laravel Policy - isolasi data per-user sepenuhnya lewat global scope `OwnedByUserScope` (model Expense & Budget) ditambah override query di resource Category. Kalau menambah endpoint/route baru **di luar Filament**, tambahkan authorization check manual.
+- **Authorization via global scope, bukan Policy.** Aplikasi ini tidak memakai Laravel Policy - isolasi data per-user sepenuhnya lewat global scope `OwnedByUserScope` (model Expense, Income, Debt & Budget) ditambah override query di resource Category. Kalau menambah endpoint/route baru **di luar Filament**, tambahkan authorization check manual.
 - **Registrasi terbuka secara default.** Siapa pun bisa mendaftar lewat halaman registrasi panel. Cara menonaktifkan: hapus/comment baris `->registration(Register::class)` di `app/Providers/Filament/AdminPanelProvider.php`.
-- **`OwnedByUserScope` tidak aktif untuk request tanpa auth** (by design, agar queue/console bisa memproses data). Kalau menambah route **publik** yang mem-query model `Expense`/`Budget`/`Category`, WAJIB tambahkan filter `user_id` manual.
+- **`OwnedByUserScope` tidak aktif untuk request tanpa auth** (by design, agar queue/console bisa memproses data). Kalau menambah route **publik** yang mem-query model `Expense`/`Income`/`Debt`/`Budget`/`Category`, WAJIB tambahkan filter `user_id` manual.
 - **Set `APP_DEBUG=false` di environment production.** Halaman debug dapat membocorkan stack trace dan isi `.env`.
 - **Foto struk disimpan di disk privat** (`receipts` - `storage/app/private/receipts`), BUKAN lagi di `public/storage`. Penyajian hanya lewat route `/receipt-image/{expense}` dengan authorization check (hanya pemilik expense; user lain dan tamu tidak mendapat akses).
 - Kredensial apa pun hanya boleh ada di `.env` (tidak pernah di-commit); `.env.example` disediakan bersih sebagai template.
@@ -230,6 +237,8 @@ bersamaan, berikut langkah-langkah yang bisa dilakukan:
 ```mermaid
 erDiagram
     USER ||--o{ EXPENSE : "mencatat"
+    USER ||--o{ INCOME : "mencatat"
+    USER ||--o{ DEBT : "mencatat"
     USER ||--o{ BUDGET : "membuat"
     USER ||--o{ CATEGORY : "kategori pribadi"
     CATEGORY ||--o{ EXPENSE : "mengelompokkan"
@@ -240,6 +249,23 @@ erDiagram
         bigint id PK
         string name
         string email
+    }
+    INCOME {
+        bigint id PK
+        bigint user_id FK
+        string source
+        decimal amount
+        date date_received
+    }
+    DEBT {
+        bigint id PK
+        bigint user_id FK
+        string type "utang / piutang"
+        string counterparty_name
+        decimal amount
+        decimal paid_amount
+        date due_date
+        string status "belum_lunas / sebagian / lunas"
     }
     EXPENSE {
         bigint id PK
@@ -276,10 +302,13 @@ erDiagram
 ```
 
 ```
-app/Filament/Resources/     Resource admin panel (Expenses, Categories, Budgets)
-app/Services/               OCRService, AIParserService, Helper, BudgetAlertService, ImageCompressor
+app/Filament/Resources/     Resource admin panel (Expenses, Incomes, Debts, Categories, Budgets)
+app/Filament/Pages/         Laporan, KasArus (arus kas: pemasukan vs pengeluaran)
+app/Services/               OCRService, AIParserService, FinancialInsightService (fitur Tanya AI),
+                            Helper, BudgetAlertService, ImageCompressor
 app/Jobs/AIParserJob.php    Job parsing async (teks OCR -> AI/fallback -> database)
-app/Support/                MoneyFormatter, ReportFilter
+app/Support/                MoneyFormatter, ReportFilter, KasArusReport, AiAnswerSanitizer
+app/Exports/                LaporanExpenseExport, KasArusExport, DebtsExport
 app/Models/Scopes/          OwnedByUserScope (isolasi data per-user)
 app/Console/Commands/       expenses:reprocess, expenses:assign-default-category,
                             receipts:move-to-private-disk

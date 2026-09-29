@@ -3,8 +3,8 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Catatan Belanja — Catat pengeluaran otomatis, cukup foto struk belanja</title>
-    <meta name="description" content="Catatan Belanja adalah aplikasi pencatat pengeluaran otomatis. Cukup foto struk belanja: OCR membaca teks dari foto, lalu AI mengubahnya menjadi data rapi.">
+    <title>Catatan Belanja — Catat keuangan lengkap: foto struk, pemasukan, utang piutang &amp; Tanya AI</title>
+    <meta name="description" content="Catatan Belanja adalah aplikasi pencatat keuangan lengkap. Cukup foto struk belanja: OCR + AI mengubahnya menjadi data rapi — dilengkapi pencatatan pemasukan, utang piutang, laporan kas arus, dan asisten Tanya AI.">
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
     <link rel="icon" type="image/png" href="/favicon.png">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -124,14 +124,14 @@
                         <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
                         <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
                     </span>
-                    OCR Baca, AI Mengubah
+                    OCR + AI untuk Keuangan Lengkap
                 </span>
                 <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 leading-tight">
-                    Catat pengeluaran otomatis,<br class="hidden sm:block">
+                    Catat keuangan lengkap,<br class="hidden sm:block">
                     cukup <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-teal-600">foto struk belanja</span>
                 </h1>
                 <p class="mt-6 text-lg sm:text-xl text-slate-600 max-w-2xl mx-auto">
-                    Catatan Belanja membantu Anda mengelola keuangan dengan mudah. Unggah foto struk: OCR membaca teks dari foto, lalu AI mengubahnya menjadi data rapi secara otomatis.
+                    Bukan cuma catatan pengeluaran: kelola pemasukan, utang piutang, dan kas arus dalam satu tempat. Unggah foto struk — OCR + AI mengubahnya jadi data rapi, lalu tanyakan apa pun soal keuangan Anda ke asisten AI-nya.
                 </p>
                 <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
                     <a href="/admin" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-4 text-base font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 rounded-xl shadow-lg shadow-emerald-600/25 transition-all duration-200 hover:shadow-xl hover:shadow-emerald-600/30 hover:-translate-y-0.5">
@@ -263,6 +263,64 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            {{-- Empat modul pendukung: aplikasi ini bukan cuma pencatat
+                 pengeluaran. Gaya visual kartu (ikon kotak w-14 h-14, padding
+                 p-8, rounded-2xl, judul text-xl) sengaja disamakan dengan kartu
+                 di section "Cara Kerja" agar konsisten. Grid 1 kolom di mobile,
+                 2 kolom dari breakpoint sm ke atas. --}}
+            <div class="mt-16 lg:mt-24">
+                <div class="text-center max-w-2xl mx-auto mb-12 lg:mb-16">
+                    <h3 class="text-2xl sm:text-3xl font-extrabold text-slate-900">Bukan Cuma Pengeluaran</h3>
+                    <p class="mt-4 text-lg text-slate-600">Empat modul lain yang membuat catatan keuangan Anda utuh dalam satu aplikasi.</p>
+                </div>
+
+                <div class="grid sm:grid-cols-2 gap-6 lg:gap-8">
+                    {{-- Pemasukan (Income) --}}
+                    <div class="bg-white rounded-2xl p-8 shadow-sm border border-slate-100 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+                        <div class="w-14 h-14 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center mb-5">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18 9 11.25l4.306 4.306a11.95 11.95 0 0 1 5.814-5.518l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941" />
+                            </svg>
+                        </div>
+                        <h4 class="text-xl font-bold text-slate-900 mb-3">Pemasukan</h4>
+                        <p class="text-slate-600 leading-relaxed">Catat uang masuk — gaji, penjualan, sampai komisi — lengkap dengan sumber dan tanggal diterimanya.</p>
+                    </div>
+
+                    {{-- Utang Piutang --}}
+                    <div class="bg-white rounded-2xl p-8 shadow-sm border border-slate-100 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+                        <div class="w-14 h-14 rounded-xl bg-teal-100 text-teal-600 flex items-center justify-center mb-5">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0 0 12 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 0 1-2.031.352 5.988 5.988 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971Zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 0 1-2.031.352 5.989 5.989 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971Z" />
+                            </svg>
+                        </div>
+                        <h4 class="text-xl font-bold text-slate-900 mb-3">Utang Piutang</h4>
+                        <p class="text-slate-600 leading-relaxed">Pantau utang dan piutang beserta jatuh temponya, dengan status pelunasan yang terhitung otomatis.</p>
+                    </div>
+
+                    {{-- Kas Arus --}}
+                    <div class="bg-white rounded-2xl p-8 shadow-sm border border-slate-100 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+                        <div class="w-14 h-14 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center mb-5">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a2.25 2.25 0 0 0-2.25-2.25H15a3 3 0 1 1-6 0H5.25A2.25 2.25 0 0 0 3 12m18 0v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6m18 0V9M3 12V9m18 0a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 9m18 0V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v3" />
+                            </svg>
+                        </div>
+                        <h4 class="text-xl font-bold text-slate-900 mb-3">Kas Arus</h4>
+                        <p class="text-slate-600 leading-relaxed">Lihat pemasukan vs pengeluaran per bulan beserta saldonya, lalu export ke PDF atau Excel saat dibutuhkan.</p>
+                    </div>
+
+                    {{-- Tanya AI --}}
+                    <div class="bg-white rounded-2xl p-8 shadow-sm border border-slate-100 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+                        <div class="w-14 h-14 rounded-xl bg-teal-100 text-teal-600 flex items-center justify-center mb-5">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+                            </svg>
+                        </div>
+                        <h4 class="text-xl font-bold text-slate-900 mb-3">Tanya AI</h4>
+                        <p class="text-slate-600 leading-relaxed">Tanya bebas soal keuangan Anda dengan bahasa sehari-hari — dijawab AI dari data catatan Anda sendiri.</p>
                     </div>
                 </div>
             </div>

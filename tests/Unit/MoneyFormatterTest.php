@@ -24,3 +24,15 @@ it('memformat angka non-uang (qty) tanpa simbol Rp', function (): void {
     expect(MoneyFormatter::number(2))->toBe('2')
         ->and(MoneyFormatter::number(2.5))->toBe('2,50');
 });
+
+/*
+ * Batas input nominal dipakai bersama form Budget/Income/Debt/Expense.
+ * Test ini mengunci nilainya sekaligus format pesan validasinya, supaya
+ * perubahan batas (dan pesannya) selalu disengaja: nilai 1 triliun dipilih
+ * agar tetap di bawah kapasitas kolom decimal(15,2) alias bebas overflow.
+ */
+it('menyediakan batas input nominal beserta pesan validasinya', function (): void {
+    expect(MoneyFormatter::MAX_INPUT_AMOUNT)->toBe(1_000_000_000_000)
+        ->and(MoneyFormatter::maxInputMessage())
+        ->toBe('Nominal terlalu besar. Maksimal Rp 1.000.000.000.000.');
+});

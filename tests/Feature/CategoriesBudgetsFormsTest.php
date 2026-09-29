@@ -11,8 +11,10 @@ use App\Models\Budget;
 use App\Models\Category;
 use App\Models\CategoryAppearanceOverride;
 use App\Models\User;
+use App\Support\MoneyFormatter;
 use Filament\Support\Icons\Heroicon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Schema;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -279,6 +281,70 @@ test('Edit Budget menolak perubahan periode yang menabrak budget lain', function
         ->fillForm(['month' => '4'])
         ->call('save')
         ->assertHasFormErrors(['month']);
+});
+
+/*
+ * Bug 2026-09-29 (SQLSTATE[22003] "numeric field overflow"): kolom
+ * budgets.amount semula decimal(10,2) — batasnya hanya Rp 99.999.999,99 —
+ * sedangkan form tidak membatasi input sama sekali. Nominal besar yang
+ * wajar untuk segmen UMKM (300 juta / 3 miliar) karena itu gagal disimpan
+ * dan user hanya melihat error query. Tiga test berikut mengunci perbaikan
+ * skema + pengaman di level form.
+ */
+
+test('nominal besar (miliar) tersimpan tanpa error overflow', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    $budget = Budget::create([
+        'user_id' => $user->id,
+        'category_id' => null,
+        'amount' => 100000,
+        'month' => 9,
+        'year' => 2026,
+    ]);
+
+    Livewire::test(EditBudget::class, ['record' => $budget->getKey()])
+        ->fillForm(['amount' => '3000000000'])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect((int) $budget->refresh()->amount)->toBe(3_000_000_000);
+});
+
+test('kolom budgets.amount memakai presisi yang sama dengan kolom uang lain', function () {
+    $amountType = function (string $table): string {
+        $column = collect(Schema::getColumns($table))->firstWhere('name', 'amount');
+
+        return (string) ($column['type'] ?? '');
+    };
+
+    // Perbandingan lintas tabel (bukan angka hardcoded) agar test tetap sah
+    // di driver apa pun: selama budgets.amount masih dipersempit ke 10,2
+    // sementara incomes.amount decimal(15,2), test ini gagal.
+    expect($amountType('budgets'))->toBe($amountType('incomes'));
+});
+
+test('nominal melebihi batas form ditolak dengan pesan validasi, bukan error query', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    $budget = Budget::create([
+        'user_id' => $user->id,
+        'category_id' => null,
+        'amount' => 250000,
+        'month' => 10,
+        'year' => 2026,
+    ]);
+
+    Livewire::test(EditBudget::class, ['record' => $budget->getKey()])
+        ->fillForm(['amount' => (string) (MoneyFormatter::MAX_INPUT_AMOUNT + 1)])
+        ->call('save')
+        ->assertHasFormErrors(['amount'])
+        ->assertSee(MoneyFormatter::maxInputMessage());
+
+    // Tidak ada perubahan yang lolos ke database saat validasi gagal.
+    expect((int) $budget->refresh()->amount)->toBe(250_000);
 });
 
 test('judul record Budget informatif untuk breadcrumb & judul halaman (konsisten dengan Expenses)', function () {
