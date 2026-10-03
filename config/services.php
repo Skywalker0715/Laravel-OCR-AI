@@ -37,11 +37,11 @@ return [
 
         'cohere' => [
         'api_key' => env('COHERE_API_KEY'),
-        // 'command-light' sudah tidak tersedia di Cohere (hapus Sep 2025).
-        // Model default command-r7b-12-2024 (lebih ringan/cepat); override
-        // lewat .env (COHERE_MODEL) bila inginkan model lain. Lihat
+        // Model default command-a-03-2025 (akurasi paling baik, tapi paling
+        // mahal per token); override lewat .env (COHERE_MODEL) bila ingin
+        // lebih hemat, mis. command-r7b-12-2024. Lihat
         // https://docs.cohere.com/docs/models
-        'model' => env('COHERE_MODEL', 'command-r7b-12-2024'),
+        'model' => env('COHERE_MODEL', 'command-a-03-2025'),
         // Model opsional khusus untuk fitur "Tanya AI" (FinancialInsightService).
         // Bisa berbeda dari model parsing struk. Kosong = pakai COHERE_MODEL.
         'insight_model' => env('COHERE_INSIGHT_MODEL'),

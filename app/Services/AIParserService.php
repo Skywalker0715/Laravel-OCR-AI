@@ -122,7 +122,12 @@ class AIParserService
         Output hanya JSON yang sesuai.
 PROMPT;
 
-        $model = config('services.cohere.model', 'command-r7b-12-2024');
+        // Nama model TIDAK ditulis ulang di sini: satu-satunya sumber
+        // kebenaran adalah config('services.cohere.model') yang sudah punya
+        // nilai bawaan (command-a-03-2025) dan bisa dioverride lewat
+        // COHERE_MODEL di .env. Menyalin nama model ke dua tempat berarti
+        // nilai default bisa diam-diam berbeda antar file.
+        $model = config('services.cohere.model');
 
         // Retry TERBATAS: hanya error sementara (transient) yang diulang -
         // HTTP 5xx / 429, timeout, atau koneksi putus. 4xx lain (mis. 400 key
@@ -158,8 +163,8 @@ PROMPT;
             ->post('https://api.cohere.ai/v1/chat', [
                 // Model 'command-light' sudah dihapus Cohere (panggilan selalu gagal
                 // → fallback regex); pakai model yang masih tersedia via COHERE_MODEL,
-                // mis. "command-r7b-12-2024" (default, lebih ringan/cepat) /
-                // "command-a-03-2025" ("command-r" polos sudah tidak terdaftar).
+                // Bawaan config: "command-a-03-2025" ("command-r" polos sudah tidak
+                // terdaftar; "command-r7b-12-2024" = opsi lebih hemat per token).
                 'model' => $model,
                 'message' => $prompt,
                 'max_tokens' => 1000,

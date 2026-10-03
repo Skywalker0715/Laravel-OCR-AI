@@ -4,7 +4,7 @@
 ![PHP](https://img.shields.io/badge/PHP-8.2%2B-777BB4?logo=php&logoColor=white)
 ![Filament](https://img.shields.io/badge/Filament-v4-F59E0B?logo=laravel&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13%2B-4169E1?logo=postgresql&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-10B981)
+![License](https://img.shields.io/badge/license-Commercial-10B981)
 
 Aplikasi web untuk mencatat **keuangan secara lengkap** - bukan hanya pengeluaran. Unggah foto struk belanja: teks dibaca otomatis (OCR Tesseract), lalu di-parsing menjadi data terstruktur (vendor, tanggal, kategori, item, total, kembalian) oleh AI (Cohere) dengan fallback regex bila API gagal. Selain pengeluaran, aplikasi ini juga mencatat **pemasukan (income)**, **utang piutang** beserta status pelunasannya, menyajikan laporan **kas arus** (pemasukan vs pengeluaran), dan menyediakan asisten **Tanya AI** untuk tanya-jawab keuangan. Semua data tersimpan di PostgreSQL dan dikelola lewat panel admin Filament.
 
@@ -24,7 +24,7 @@ Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-use
 - **Dashboard** - statistik total/jumlah/rata-rata + grafik garis riwayat pengeluaran.
 - **Multi-user** - setiap user hanya melihat data miliknya (global scope `OwnedByUserScope`).
 - **Notifikasi parsing** - hasil parsing (sukses / estimasi / gagal-total) dikirim ke database notification berisi link "Periksa & Edit".
-- **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan).
+- **Peringatan antrian** - dashboard memperingatkan bila job parsing macet (queue worker tidak jalan). Hitungan hanya mencakup struk milik user yang sedang login.
 - **Tanya AI** - tombol aksi di Dashboard untuk bertanya tentang keuangan pakai bahasa natural (contoh: "Berapa total pengeluaran saya?", "Kategori apa paling boros?", "Berapa sisa utang saya?"). Pertanyaan otomatis di-*retrieve* ke data yang relevan - periode, kategori, dan jenis data yang disebut dideteksi dari pertanyaannya - dan cakupannya meliputi **semua jenis data** (pengeluaran, pemasukan, serta utang & piutang). Ringkasan data itu baru dikirim ke Cohere dengan system prompt ketat agar tidak ngarang angka. Rate limit harian configurable lewat `AI_INSIGHT_DAILY_LIMIT` (default 10 pertanyaan/user/hari).
 
 ## Cara Kerja
@@ -47,7 +47,7 @@ flowchart TD
 - Filament v4 (panel admin)
 - PostgreSQL
 - Tesseract OCR (`thiagoalessio/tesseract_ocr`)
-- Cohere API - dipakai untuk **2 keperluan**: (1) **parsing struk** (teks hasil OCR -> JSON terstruktur) dan (2) fitur **Tanya AI** / insight keuangan (`FinancialInsightService`). Model default `command-r7b-12-2024`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal). Fitur Tanya AI bisa memakai model berbeda lewat `COHERE_INSIGHT_MODEL`.
+- Cohere API - dipakai untuk **2 keperluan**: (1) **parsing struk** (teks hasil OCR -> JSON terstruktur) dan (2) fitur **Tanya AI** / insight keuangan (`FinancialInsightService`). Model default `command-a-03-2025`, configurable lewat `COHERE_MODEL` (+ fallback regex parser bila API/key gagal). Fitur Tanya AI bisa memakai model berbeda lewat `COHERE_INSIGHT_MODEL`.
 - GD (kompresi / pra-proses gambar)
 - `maatwebsite/excel` (export .xlsx), `barryvdh/laravel-dompdf` (export PDF)
 - Pest (testing)
@@ -59,7 +59,7 @@ flowchart TD
 - PostgreSQL >= 13
 - **Tesseract OCR** ter-install di server + language data **`ind` dan `eng`**
   (Windows: installer UB-Mannheim — pastikan mencentang kedua language pack, atau salin `ind.traineddata` & `eng.traineddata` ke `C:\Program Files\Tesseract-OCR\tessdata`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
-- Cohere API key (opsional - tanpa key, aplikasi tetap jalan memakai parser fallback regex)
+- Cohere API key (opsional - tanpa key, parsing struk tetap jalan memakai parser fallback regex, **tetapi fitur Tanya AI tidak bisa menjawab**)
   - Tanpa key: parsing struk tetap berjalan (fallback regex), sementara fitur **Tanya AI** butuh key untuk bisa menjawab.
   - Fitur **Tanya AI**: `AI_INSIGHT_DAILY_LIMIT=10` (default) membatasi jumlah pertanyaan per user per hari, dan `COHERE_INSIGHT_MODEL` (opsional) memakai model lain khusus untuk Tanya AI - keduanya boleh dibiarkan default.
 - Ekstensi `pcntl` (khusus Linux/Mac, **opsional**) — hanya dibutuhkan slot `logs` pada `composer run dev` (Laravel Pail); di Windows slot ini otomatis dilewati
@@ -72,7 +72,7 @@ flowchart TD
 4. Trial Key ini GRATIS 100%, cukup untuk 1.000 panggilan API per bulan, cocok untuk penggunaan personal/testing. **CATATAN PENTING:** Trial Key TIDAK BOLEH dipakai untuk aplikasi komersial/production dengan banyak user — untuk itu perlu upgrade ke Production Key berbayar (lihat cohere.com/pricing untuk detail biaya).
 5. Paste key yang sudah di-copy ke file .env, isi variabel `COHERE_API_KEY=<key_kamu_disini>`.
 6. **PENTING:** jangan pernah share/commit file `.env` ke manapun (sudah otomatis di-gitignore oleh project ini) — API key itu bersifat rahasia seperti password.
-7. **Tetap tangguh tanpa AI.** Aplikasi ini dirancang dengan fallback parser bawaan — jika Cohere API tidak tersedia (belum setup API key, sedang down, atau limit trial habis), sistem OTOMATIS beralih ke parser cerdas berbasis pola tanpa kehilangan fungsi utama. Ingin pakai tanpa AI sama sekali? Cukup biarkan `COHERE_API_KEY` kosong di `.env` — aplikasi tetap berjalan penuh.
+7. **Tetap tangguh tanpa AI.** Aplikasi ini dirancang dengan fallback parser bawaan — jika Cohere API tidak tersedia (belum setup API key, sedang down, atau limit trial habis), sistem OTOMATIS beralih ke parser cerdas berbasis pola tanpa kehilangan fungsi utama (pencatatan struk, laporan, budget, utang piutang). Ingin pakai tanpa AI sama sekali? Cukup biarkan `COHERE_API_KEY` kosong di `.env` — aplikasi tetap berjalan, **kecuali fitur Tanya AI** yang memang membutuhkan key.
 
 > ### 🔑 API key TIDAK disertakan dalam source code ini
 >
@@ -112,11 +112,14 @@ flowchart TD
    DB_USERNAME=...
    DB_PASSWORD=...
    COHERE_API_KEY=      # opsional
-   COHERE_MODEL=command-r7b-12-2024   # model AI parsing (default)
+   COHERE_MODEL=command-a-03-2025     # model AI parsing (default)
    COHERE_INSIGHT_MODEL=              # model khusus fitur Tanya AI (opsional)
    AI_INSIGHT_DAILY_LIMIT=10          # batas pertanyaan Tanya AI/user/hari (default 10)
    APP_DEBUG=false      # WAJIB false di production
    ```
+
+   > **Model Cohere.** Model default `command-a-03-2025` (akurat, tapi lebih mahal per token). Ganti `COHERE_MODEL` di `.env` ke `command-r7b-12-2024` jika ingin lebih hemat.
+
    Kemudian generate app key:
    ```bash
    php artisan key:generate
@@ -127,6 +130,8 @@ flowchart TD
    php artisan migrate
    php artisan db:seed
    ```
+
+   > ⚠️ **Akun seed memakai password lemah yang publik** (`test@example.com` / `password`). Di server yang bisa diakses orang lain, **segera ganti passwordnya** (atau hapus akun itu dan daftar akun baru) setelah `db:seed`.
 
 4. Symlink storage (untuk asset publik):
    ```bash
@@ -167,7 +172,10 @@ Checklist singkat untuk sebelum aplikasi dipakai pengguna sungguhan. File
       situs masih `http://` membuat login tidak pernah berhasil tersimpan.
 - [ ] `DB_*` terisi kredensial database production (jangan pakai akun `root`).
 - [ ] `COHERE_API_KEY` diisi dengan **API key milik Anda sendiri** — repo ini
-      sengaja tidak menyertakan key apa pun. Kosongkan saja bila tidak memakai AI.
+      sengaja tidak menyertakan key apa pun. Kosongkan saja bila tidak memakai AI
+      (fitur Tanya AI tidak akan aktif).
+- [ ] **Ganti password akun seed** `test@example.com` (atau hapus akunnya) segera
+      setelah `php artisan db:seed`.
 
 **Kode & aset**
 - [ ] `composer install --no-dev --optimize-autoloader` (produksi tidak butuh dev).
@@ -186,7 +194,7 @@ Checklist singkat untuk sebelum aplikasi dipakai pengguna sungguhan. File
 - [ ] Login queue worker memakai akun non-root untuk keamanan proses.
 
 **Verifikasi setelah deploy**
-- [ ] `php artisan test` lulus di environment pengujian.
+- [ ] Jalankan `php artisan test` **hanya di environment pengembangan/pengujian dengan database terpisah**. **Jangan pernah menjalankannya di database production** — test dapat mereset/menghapus data.
 - [ ] Upload satu struk sungguhan, lalu pastikan: foto terunggah, notifikasi
       parsing masuk, dan vendor/total/item terisi.
 - [ ] Buka `/admin` dalam jendela incognito — pastikan tidak ada halaman debug
@@ -271,7 +279,7 @@ Parsing dieksekusi langsung saat upload, jadi tidak perlu worker. Trade-off: req
 
 > **Catatan untuk slot `logs`/Pail:** `php artisan dev:logs` — command pembungkus di `app/Console/Commands/DevLogs.php` — memanggil `php artisan pail` hanya bila ekstensi `pcntl` tersedia. Di sistem tanpa `pcntl` (Windows/PHP NTS), perintah dilewati dengan aman; pantau log via `storage/logs/laravel.log`.
 
-Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`) atau registrasi akun baru (lihat catatan keamanan di bawah).
+Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`, **wajib diganti di server yang dapat diakses orang lain**) atau registrasi akun baru (lihat catatan keamanan di bawah).
 
 ## 🔄 Upgrade dari Versi Lama (opsional)
 
@@ -289,7 +297,9 @@ Command aman dijalankan berulang (idempotent) dan memverifikasi setiap file sebe
 php artisan test
 ```
 
-Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifikasi, halaman Laporan/Export, dan route foto struk.
+> ⚠️ Jalankan test **hanya** pada database pengembangan/pengujian yang terpisah, **jangan** pada database production. Test dapat mereset atau menghapus data.
+
+Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifikasi, halaman Laporan/Export, utang piutang, kas arus, Tanya AI, dan route foto struk.
 
 ## 🔐 Catatan Keamanan untuk Pembeli/Developer
 
@@ -412,9 +422,11 @@ erDiagram
 app/Filament/Resources/     Resource admin panel (Expenses, Incomes, Debts, Categories, Budgets)
 app/Filament/Pages/         Laporan, KasArus (arus kas: pemasukan vs pengeluaran)
 app/Services/               OCRService, AIParserService, FinancialInsightService (fitur Tanya AI),
-                            Helper, BudgetAlertService, ImageCompressor
+                            Helper, BudgetAlertService, ImageCompressor, DeleteUserAccountService
 app/Jobs/AIParserJob.php    Job parsing async (teks OCR -> AI/fallback -> database)
-app/Support/                MoneyFormatter, ReportFilter, KasArusReport, AiAnswerSanitizer
+app/Support/                MoneyFormatter, ReportFilter, KasArusReport, AiAnswerSanitizer,
+                            LogSanitizer (potong data sensitif di log), ColorHex (validasi warna),
+                            MonthExpression (agregasi per bulan lintas driver DB)
 app/Exports/                LaporanExpenseExport, KasArusExport, DebtsExport
 app/Models/Scopes/          OwnedByUserScope (isolasi data per-user)
 app/Console/Commands/       expenses:reprocess, expenses:assign-default-category,
@@ -423,4 +435,4 @@ app/Console/Commands/       expenses:reprocess, expenses:assign-default-category
 
 ## 📄 Lisensi
 
-MIT - bebas digunakan dan dimodifikasi untuk project pribadi maupun klien.
+Source code ini adalah **produk komersial**. Penggunaan, modifikasi, dan distribusi tunduk pada ketentuan lisensi yang berlaku di marketplace tempat Anda membelinya (mis. Regular License / Extended License). Dilarang menyebarkan ulang atau menjual kembali source code ini sebagai produk yang berdiri sendiri di luar ketentuan lisensi tersebut.

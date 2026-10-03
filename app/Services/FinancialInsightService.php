@@ -281,7 +281,13 @@ class FinancialInsightService
         // seluruh riwayat (bukan jendela pendek seperti 90 hari).
         $filters = $this->detectFilters($user, $question);
         $summary = $this->buildSummary($user, $filters);
-        $model = config('services.cohere.insight_model', config('services.cohere.model', 'command-r7b-12-2024'));
+        // Prioritas model Tanya AI: COHERE_INSIGHT_MODEL (kalau diisi) → model
+        // parsing struk. `?:` (bukan argumen kedua config()) dipakai karena
+        // COHERE_INSIGHT_MODEL kosong di .env menghasilkan string kosong, yang
+        // TIDAK akan digantikan oleh nilai bawaan config() — dengan `?:` model
+        // kosong otomatis memakai services.cohere.model. Nama model tidak
+        // ditulis ulang di sini; sumber kebenaran tetap config/services.php.
+        $model = config('services.cohere.insight_model') ?: config('services.cohere.model');
 
         try {
             $response = Http::withToken(config('services.cohere.api_key'))
