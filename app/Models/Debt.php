@@ -5,8 +5,10 @@ namespace App\Models;
 use App\Models\Scopes\OwnedByUserScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
 /**
@@ -196,7 +198,16 @@ class Debt extends Model
      * Catat pembayaran (utang) / penerimaan (piutang). Status & clamp nominal
      * diurus hook saving, termasuk kasus pembayaran yang melebihi sisa.
      *
+     * Anti lost-update: seluruh pembayaran dijalankan di dalam DB::transaction
+     * dengan lockForUpdate (SELECT ... FOR UPDATE) pada baris debt, sehingga
+     * pembayaran paralel dari proses/tab lain DISERIALISASI — transaksi kedua
+     * menunggu transaksi pertama commit, lalu membaca paid_amount TERBARU hasil
+     * kunci sebelum menambahkannya (bukan snapshot basi di memori). Tanpa ini,
+     * dua pembayaran Rp100.000 yang berjalan bersamaan bisa tersimpan hanya
+     * Rp100.000 (satu update menimpa update lain).
+     *
      * @throws InvalidArgumentException bila nominal tidak lebih besar dari 0.
+     * @throws ModelNotFoundException   bila catatan terhapus di tengah jalan.
      */
     public function recordPayment(float $amount): void
     {
@@ -204,8 +215,34 @@ class Debt extends Model
             throw new InvalidArgumentException('Nominal pembayaran harus lebih besar dari 0.');
         }
 
-        $this->paid_amount = (float) ($this->paid_amount ?? 0) + $amount;
-        $this->save();
+        DB::transaction(function () use ($amount): void {
+            // Kunci baris debt. withoutGlobalScopes() disengaja: objek $this
+            // sudah pasti baris yang sah dipanggil caller (scoping pemanggilan
+            // tetap urusan global scope saat baris itu MUAT, bukan saat lock).
+            $locked = static::query()
+                ->withoutGlobalScopes()
+                ->whereKey($this->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($locked === null) {
+                throw new ModelNotFoundException(
+                    "Catatan utang/piutang id {$this->getKey()} sudah tidak ada — pembayaran dibatalkan."
+                );
+            }
+
+            // Hitung ulang DARI DATA TERKUNCI: atribut basi di memori ditimpa
+            // dengan nilai terkini (syncOriginal=true supaya hanya paid_amount
+            // (+ status oleh hook) yang dianggap berubah oleh Eloquent).
+            $this->setRawAttributes($locked->getAttributes(), true);
+
+            $this->paid_amount = (float) ($this->paid_amount ?? 0) + $amount;
+
+            // Lewat save() — BUKAN query builder mentah — agar hook saving
+            // (normalizePaymentState: clamp ke amount + derive status) tetap
+            // berjalan untuk jalur ini.
+            $this->save();
+        });
     }
 
     /** Tandai catatan sebagai lunas (paid_amount = amount). */

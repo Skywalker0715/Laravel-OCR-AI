@@ -91,6 +91,11 @@ class Dashboard extends BaseDashboard
                 Textarea::make('question')
                     ->label('Pertanyaan Anda')
                     ->required()
+                    // Batas panjang pertanyaan: menolak input kepanjangan DI
+                    // SISI UI (sebelum request dikirim & sebelum kuota harian
+                    // terpotong). FinancialInsightService memangkas ulang sebagai
+                    // jaring pengaman untuk jalur non-UI (command/queue).
+                    ->maxLength(FinancialInsightService::MAX_QUESTION_CHARS)
                     ->rows(3)
                     ->placeholder('Contoh: berapa total pengeluaran saya dari awal? / pengeluaran bulan Maret 2025 / berapa utang saya?'),
             ])
@@ -208,9 +213,21 @@ class Dashboard extends BaseDashboard
         }
 
         $isError = false;
+        $isLimit = false;
 
         try {
-            $answer = app(FinancialInsightService::class)->ask($user, $question);
+            $result = app(FinancialInsightService::class)->ask($user, $question);
+
+            // Pengaman kedua (jaga-jaga bila AI tetap menulis markdown walau
+            // system prompt sudah melarangnya): buang sisa penanda **bold** /
+            // __bold__ SEBELUM jawaban dikirim ke modal. Service juga sudah
+            // membersihkannya, jadi ini murni jaring terakhir.
+            $answer = AiAnswerSanitizer::stripMarkdown($result->text);
+
+            // Status limit/error dibaca dari DTO, bukan dari tebakan
+            // str_contains() atas isi kalimat — jadi mengubah copy pesan tidak
+            // lagi diam-diam merusak ikon/warna di modal.
+            $isLimit = $result->isLimitNotice();
         } catch (Throwable $e) {
             // FinancialInsightService sudah punya fallback internal (pesan
             // ramah bila API Cohere gagal/tidak tersedia); catch ini hanya
@@ -226,17 +243,9 @@ class Dashboard extends BaseDashboard
             $isError = true;
         }
 
-        // Pengaman kedua (jaga-jaga bila AI tetap menulis markdown walau system
-        // prompt sudah melarangnya): buang sisa penanda **bold**/__bold__ SEBELUM
-        // jawaban dikirim ke modal. FinancialInsightService juga sudah
-        // membersihkannya, jadi ini murni jaring terakhir.
-        $answer = AiAnswerSanitizer::stripMarkdown($answer);
-
-        // Guard rate limit harian FinancialInsightService memakai pesan dengan
-        // prefix 'Batas pertanyaan harian tercapai' (lihat sprintf di
-        // FinancialInsightService). Dilabeli terpisah supaya modal menampilkan
-        // penanda peringatan oranye, bukan dianggap jawaban biasa.
-        $isLimit = str_contains($answer, 'Batas pertanyaan harian tercapai');
+        // Catatan: $isError sengaja hanya true untuk exception yang belum
+        // tertangani. Gangguan Cohere (5xx/timeout) sengaja ditampilkan sebagai
+        // jawaban biasa supaya user tidak bingung dengan error sistem.
 
         // Ganti modal "Tanya AI" dengan modal "Jawaban AI". Keduanya memakai
         // nesting index yang sama (0), sehingga JS Filament membuka ulang modal

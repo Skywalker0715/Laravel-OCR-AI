@@ -33,9 +33,11 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Collection as BaseCollection;
 use Maatwebsite\Excel\Excel as ExcelWriter;
 use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
@@ -270,7 +272,7 @@ class Laporan extends Page implements HasTable
                 ->label('Export Excel')
                 ->icon(Heroicon::OutlinedTableCells)
                 ->color('success')
-                ->action(fn (): StreamedResponse => $this->exportExcel()),
+                ->action(fn (): BinaryFileResponse => $this->exportExcel()),
 
             Action::make('resetFilters')
                 ->label('Reset Filter')
@@ -300,12 +302,20 @@ class Laporan extends Page implements HasTable
 
     /**
      * Query expense hasil filter — sumber kebenaran tabel, widget, dan export.
+     *
+     * 'category' beserta override tampilan milik user login ikut eager-load:
+     * kolom Kategori di tabel dan breakdown PDF sama-sama memanggil
+     * displayColorFor(), jadi tanpa eager-load tiap kategori memicu satu query
+     * ke category_appearance_overrides (N+1).
      */
     public function filteredExpensesQuery(): Builder
     {
         return $this->reportFilter()
             ->apply(Expense::query()->whereNotNull('amount'))
-            ->with('category');
+            ->with([
+                'category' => fn (Builder|Relation $query): Builder|Relation => $query
+                    ->withAppearanceOverridesFor(auth()->id()),
+            ]);
     }
 
     /**
@@ -336,11 +346,39 @@ class Laporan extends Page implements HasTable
     }
 
     /**
+     * Batas baris DETAIL yang dicetak di PDF.
+     *
+     * Ringkasan (total, jumlah transaksi, rata-rata) dan breakdown kategori
+     * TIDAK terpengaruh batas ini — keduanya dihitung dari agregat SQL atas
+     * SELURUH data hasil filter, bukan dari baris yang dicetak. Batas ini
+     * hanya menjaga supaya PDF tidak memblenderi ribuan baris (yang membuat
+     * dompdf berat dan file bisa membesar tak terkendali), dengan catatan
+     * truncation yang tercetak jelas di PDF.
+     *
+     * Export Excel tidak dibatasi: file .xlsx di-stream jauh lebih ringan dan
+     * pengguna yang butuh semua baris tetap bisa mendapatkannya lewat sana.
+     */
+    private const PDF_DETAIL_ROW_LIMIT = 1000;
+
+    /**
      * Export PDF via dompdf; memakai StreamedResponse agar andal dikirim dari aksi Livewire.
+     *
+     * Baris detail dibatasi PDF_DETAIL_ROW_LIMIT, sedangkan ringkasan tetap
+     * dihitung dari seluruh data (lihat summarizeFromQuery()).
      */
     public function exportPdf(): StreamedResponse
     {
-        $pdf = $this->buildPdfDocument($this->orderedExportQuery()->get());
+        $query = $this->orderedExportQuery();
+
+        // Jumlah baris SESUNGGUHNYA hasil filter — dipakai untuk ringkasan
+        // dan catatan truncation, dihitung dari SQL (bukan dari baris yang
+        // dicetak) supaya angka di PDF tetap jujur meski baris dipotong.
+        $totalRowCount = $this->countFilteredExpenses();
+
+        $pdf = $this->buildPdfDocument(
+            $query->limit(self::PDF_DETAIL_ROW_LIMIT)->get(),
+            $totalRowCount,
+        );
 
         return response()->streamDownload(
             fn () => print ($pdf->output()),
@@ -349,19 +387,37 @@ class Laporan extends Page implements HasTable
         );
     }
 
+    /** Jumlah seluruh expense hasil filter — satu COUNT di SQL, bukan count() collection. */
+    private function countFilteredExpenses(): int
+    {
+        return (int) $this->filteredExpensesQuery()
+            ->toBase()
+            ->count();
+    }
+
     /**
      * Susun dokumen PDF laporan (kop, ringkasan, breakdown kategori, daftar transaksi)
      * dari expense ter-filter & ter-urut; method terpisah agar bisa diuji langsung.
+     *
+     * @param  Collection<int, Expense>  $expenses  Baris detail yang DICETAK (sudah mungkin dipotong).
+     * @param  int|null  $totalRowCount  Jumlah seluruh baris hasil filter; null = semua baris tercetak.
      */
-    public function buildPdfDocument(Collection $expenses): \Barryvdh\DomPDF\PDF
+    public function buildPdfDocument(Collection $expenses, ?int $totalRowCount = null): \Barryvdh\DomPDF\PDF
     {
+        $totalRowCount ??= $expenses->count();
+
         return Pdf::loadView('exports.laporan-pdf', [
             'periodLabel' => $this->reportFilter()->periodLabel(),
             'userName' => auth()->user()?->name ?? '—',
             'generatedAt' => now()->format('d/m/Y H:i'),
             'expenses' => $expenses,
-            'summary' => $this->summarize($expenses),
+            // Ringkasan & breakdown dihitung dari agregat SQL atas SELURUH data
+            // hasil filter — bukan dari $expenses yang mungkin dipotong.
+            'summary' => $this->summarizeFromQuery(),
             'categoryBreakdown' => $this->categoryBreakdown($expenses),
+            'detailLimit' => self::PDF_DETAIL_ROW_LIMIT,
+            'isTruncated' => $expenses->count() < $totalRowCount,
+            'totalRowCount' => $totalRowCount,
         ])
             // Paper A4 portrait ditetapkan eksplisit agar layout tidak tergantung
             // config default package. Enam kolom rincian masih lega di portrait;
@@ -373,14 +429,18 @@ class Laporan extends Page implements HasTable
     /**
      * Export hasil laporan ke Excel (.xlsx) via maatwebsite/excel.
      * Isi file = query yang sama dengan tabel di layar (filter + urutan).
+     *
+     * Memakai Excel::download() (BinaryFileResponse yang di-stream dari
+     * temporary file) bukan Excel::raw() + print(): laporan pengeluaran
+     * bisa berisi ribuan baris, dan raw() akan menahan seluruh file .xlsx
+     * sebagai satu string di memori PHP. Isi file tidak berubah.
      */
-    public function exportExcel(): StreamedResponse
+    public function exportExcel(): BinaryFileResponse
     {
-        $content = (string) Excel::raw(new LaporanExpenseExport($this->orderedExportQuery()), ExcelWriter::XLSX);
-
-        return response()->streamDownload(
-            fn () => print ($content),
+        return Excel::download(
+            new LaporanExpenseExport($this->orderedExportQuery()),
             $this->exportFilename('xlsx'),
+            ExcelWriter::XLSX,
             ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
         );
     }
@@ -401,11 +461,29 @@ class Laporan extends Page implements HasTable
         return "laporan-pengeluaran-{$suffix}.{$extension}";
     }
 
-    /** Ringkasan angka (total, jumlah, rata-rata) expense hasil filter; dipakai PDF & bisa diuji langsung. */
-    private function summarize(Collection $expenses): array
+    /**
+     * Ringkasan angka (total, jumlah, rata-rata) expense hasil filter.
+     *
+     * Dihitung dari SATU query agregat SQL atas SELURUH data hasil filter —
+     * bukan dari collection baris detail. Ini penting karena baris detail PDF
+     * dibatasi 1000 baris: kalau ringkasan dijumlahkan dari collection itu,
+     * total di PDF akan ikut terpotong dan menjadi tidak jujur.
+     *
+     * @return array{total: float, count: int, average: float}
+     */
+    private function summarizeFromQuery(): array
     {
-        $total = (float) $expenses->sum('amount');
-        $count = $expenses->count();
+        $amount = $this->filteredExpensesQuery()->getModel()->qualifyColumn('amount');
+
+        $aggregate = $this->filteredExpensesQuery()
+            ->toBase()
+            ->reorder()
+            ->selectRaw('COUNT(*) AS aggregate_count')
+            ->selectRaw("COALESCE(SUM({$amount}), 0) AS aggregate_total")
+            ->first();
+
+        $total = (float) $aggregate->aggregate_total;
+        $count = (int) $aggregate->aggregate_count;
 
         return [
             'total' => $total,
@@ -414,21 +492,143 @@ class Laporan extends Page implements HasTable
         ];
     }
 
-    /** Breakdown pengeluaran per kategori (nama, warna, jumlah, total) untuk tabel breakdown di PDF. */
-    private function categoryBreakdown(Collection $expenses): BaseCollection
+    /**
+     * Breakdown pengeluaran per kategori (nama, warna, jumlah, total) untuk PDF.
+     *
+     * Sama seperti ringkasan, dihitung dari SQL GROUP BY atas SELURUH data
+     * hasil filter (bukan dari baris detail yang mungkin dipotong), lalu nama
+     * & warna tiap kategori diambil dalam satu query kategori + satu query
+     * override — bukan satu query per kategori (N+1).
+     *
+     * @param  Collection<int, Expense>  $detailRows  Baris detail yang sudah di-eager-load kategori.
+     * @return BaseCollection<int, array{name: string, color: string, count: int, total: float}>
+     */
+    private function categoryBreakdown(Collection $detailRows): BaseCollection
     {
-        return $expenses
-            ->groupBy(fn (Expense $expense): int => (int) $expense->category_id)
-            ->map(fn (Collection $group): array => [
-                'name' => $group->first()->category?->name ?? 'Tanpa Kategori',
-                'color' => auth()->user() instanceof User
-                    ? $group->first()->category?->displayColorFor(auth()->user()) ?? '#CBD5E1'
-                    : $group->first()->category?->color ?? '#CBD5E1',
-                'count' => $group->count(),
-                'total' => (float) $group->sum('amount'),
-            ])
+        $model = $this->filteredExpensesQuery()->getModel();
+        $amount = $model->qualifyColumn('amount');
+        $categoryId = $model->qualifyColumn('category_id');
+
+        $rows = $this->filteredExpensesQuery()
+            ->toBase()
+            ->reorder()
+            ->selectRaw("{$categoryId} AS category_id")
+            ->selectRaw('COUNT(*) AS aggregate_count')
+            ->selectRaw("COALESCE(SUM({$amount}), 0) AS aggregate_total")
+            ->groupBy($categoryId)
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return collect();
+        }
+
+        $categories = $this->categoriesForBreakdown(
+            $rows->pluck('category_id')->filter()->unique()->values(),
+            $detailRows,
+        );
+
+        return $rows
+            ->map(function (object $row) use ($categories): array {
+                $category = $row->category_id !== null
+                    ? $categories->get((int) $row->category_id)
+                    : null;
+
+                return [
+                    'name' => $category?->name ?? 'Tanpa Kategori',
+                    'color' => auth()->user() instanceof User
+                        ? $category?->displayColorFor(auth()->user()) ?? '#CBD5E1'
+                        : $category?->color ?? '#CBD5E1',
+                    'count' => (int) $row->aggregate_count,
+                    'total' => (float) $row->aggregate_total,
+                ];
+            })
             ->sortByDesc('total')
             ->values();
+    }
+
+    /**
+     * Map kategori untuk breakdown: nama + override milik user login.
+     *
+     * Memakai ULANG kategori yang sudah eager-load pada $detailRows, lalu
+     * hanya mengambil kategori yang belum ada di sana. Gunanya: breakdown
+     * dihitung dari SELURUH data (bisa memuat kategori yang tidak lagi ada di
+     * baris detail bila detail dipotong), sementara query tambahan tetap
+     * maksimal satu — bukan satu per kategori.
+     *
+     * @param  BaseCollection<int, int>  $categoryIds  Semua kategori id dari agregat SQL.
+     * @param  Collection<int, Expense>  $detailRows  Baris detail (sudah eager-load `category`).
+     * @return BaseCollection<int, Category>
+     */
+    private function categoriesForBreakdown(BaseCollection $categoryIds, Collection $detailRows): BaseCollection
+    {
+        // Pastikan override milik user login sudah ter-muat untuk kategori
+        // mana pun yang sudah ada di baris detail (biar displayColorFor() tidak
+        // memicu query satu per kategori).
+        $this->loadAppearanceOverridesFor($detailRows);
+
+        $loaded = $detailRows
+            ->map(fn (Expense $expense): ?Category => $expense->category)
+            ->filter()
+            ->keyBy('id');
+
+        $missing = $categoryIds->reject(fn (int $id): bool => $loaded->has($id));
+
+        if ($missing->isEmpty()) {
+            return $loaded;
+        }
+
+        return $loaded->merge(
+            Category::query()
+                ->whereIn('id', $missing->values()->all())
+                ->withAppearanceOverridesFor(auth()->id())
+                ->get()
+                ->keyBy('id')
+        );
+    }
+
+    /**
+     * Pastikan setiap kategori di $expenses punya relasi appearanceOverrides
+     * milik user login yang SUDAH dimuat — satu query untuk seluruh kategori.
+     *
+     * Kalau relasi category belum eager-load sama sekali, kategori diambil
+     * satu query (jumlah kategori berbeda), lalu override-nya satu query lagi.
+     * Dipisah agar jelas mana yang lazy-load dan mana yang sudah eager.
+     *
+     * @param  Collection<int, Expense>  $expenses
+     */
+    private function loadAppearanceOverridesFor(Collection $expenses): void
+    {
+        // Jalur normal: filteredExpensesQuery() sudah eager-load kategori
+        // beserta override-nya, jadi tidak ada yang perlu diunduh lagi.
+        if (! $expenses->contains(
+            fn (Expense $expense): bool => $expense->category_id !== null
+                && ! $expense->relationLoaded('category')
+        )) {
+            return;
+        }
+
+        // Relasi category belum eager-load: ambil kategorinya sekaligus (1 query)
+        // lengkap dengan override milik user login (1 query), bukan satu per
+        // kategori seperti sebelumnya.
+        $categories = Category::query()
+            ->whereIn('id', $expenses->pluck('category_id')->filter()->unique()->values()->all())
+            ->withAppearanceOverridesFor(auth()->id())
+            ->get()
+            ->keyBy('id');
+
+        if ($categories->isEmpty()) {
+            return;
+        }
+
+        // Pasang kategori yang sudah ter-eager-load ke setiap expense supaya
+        // displayColorFor() tidak perlu query lagi.
+        $expenses->each(function (Expense $expense) use ($categories): void {
+            $category = $categories->get($expense->category_id);
+
+            if ($category !== null) {
+                $expense->setRelation('category', $category);
+            }
+        });
     }
 
     /** Opsi kategori filter: default sistem (user_id NULL) + milik user login — pola sama dengan seluruh panel. */

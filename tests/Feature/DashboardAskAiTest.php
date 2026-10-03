@@ -7,11 +7,15 @@ use App\Models\Expense;
 use App\Models\Income;
 use App\Models\User;
 use App\Services\FinancialInsightService;
+use App\Support\AiInsightResult;
+use App\Support\AiInsightStatus;
 use Filament\Notifications\Notification;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Livewire\Livewire;
 
@@ -392,11 +396,15 @@ test('pengaman kedua di Dashboard: markdown tetap dibersihkan walau service meng
 
     // Service diganti stub yang sengaja "lolos" mengembalikan markdown, untuk
     // membuktikan jaring terakhir di Dashboard.php tetap bekerja sendiri.
+    //
+    // Catatan: stub ini sekarang meng-override ask() versi terstruktur
+    // (AiInsightResult), karena status limit/error tidak lagi dibaca dari teks
+    // jawaban. Asersinya tetap sama persis: markdown harus hilang.
     app()->instance(FinancialInsightService::class, new class extends FinancialInsightService
     {
-        public function ask(User $user, string $question): string
+        public function ask(User $user, string $question): AiInsightResult
         {
-            return 'Total **Rp 9.400** di kategori __Lainnya__.';
+            return AiInsightResult::answered('Total **Rp 9.400** di kategori __Lainnya__.');
         }
     });
 
@@ -895,7 +903,7 @@ test('saat limit harian tercapai, modal Jawaban AI menampilkan pesan batas haria
         \Illuminate\Support\Facades\RateLimiter::hit($key, 86400);
     }
 
-    $answer = $service->ask($user, 'Berapa total pengeluaran saya?');
+    $answer = $service->ask($user, 'Berapa total pengeluaran saya?')->text;
 
     // Pesan harus menjelaskan batas tercapai, menyebutkan kuota (5 dari 5), dan estimasi waktu reset
     expect($answer)->toContain('Batas pertanyaan harian tercapai (5 dari 5)')
@@ -937,12 +945,12 @@ test('rate limit Tanya AI mengikuti nilai config services.cohere.daily_limit', f
 
     // Pertanyaan 1, 2, 3 harus berhasil
     for ($i = 1; $i <= 3; $i++) {
-        $answer = $service->ask($user, "Pertanyaan {$i}");
+        $answer = $service->ask($user, "Pertanyaan {$i}")->text;
         expect($answer)->toBe('Jawaban simulasi.');
     }
 
     // Pertanyaan ke-4 harus terblokir karena limit = 3
-    $blockedAnswer = $service->ask($user, 'Pertanyaan ke 4');
+    $blockedAnswer = $service->ask($user, 'Pertanyaan ke 4')->text;
     expect($blockedAnswer)->toContain('Batas pertanyaan harian tercapai (3 dari 3)')
         ->and($blockedAnswer)->toContain('Bisa tanya lagi dalam')
         ->and($blockedAnswer)->not->toContain('tidak tersedia');
@@ -987,4 +995,332 @@ test('modal Tanya AI memuat indikator loading "AI sedang menjawab..." yang dibat
     expect($html)->toContain('AI sedang menjawab...')
         ->and($html)->toContain('wire:loading.flex')
         ->and($html)->toContain('wire:target="callMountedAction"');
+});
+
+/*
+|--------------------------------------------------------------------------
+| TASK 5 — Batas pertanyaan, hitung kuota yang adil, & skala data
+|--------------------------------------------------------------------------
+| 1. Textarea dibatasi 2000 karakter; pertanyaan kepanjangan ditolak validasi
+|    dan TIDAK pernah sampai ke API Cohere.
+| 2. Error sisi server / timeout tidak boleh menghabiskan kuota harian user,
+|    tapi limiter anti-spam per menit tetap menahan spam.
+| 3. 3.000 expense lewat factory: prompt tetap di bawah batas ukuran dan
+|    data user lain tetap tidak bocor.
+*/
+
+test('textarea Tanya AI dibatasi 2000 karakter', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    $component = Livewire::test(Dashboard::class)->mountAction('askAi');
+
+    // Filament v4: Action::getSchema() membutuhkan argumen Schema, jadi schema
+    // action yang ter-mount diambil lewat komponen Livewire-nya
+    // (`mountedActionSchema0` adalah nama internal yang dipakai Filament).
+    // Pendekatan ini mengikuti API publik Filament, bukan memanggil method
+    // protected/internal yang sewaktu-waktu bisa berubah.
+    $questionField = collect(
+        $component->instance()->getSchema('mountedActionSchema0')->getComponents()
+    )->first(fn ($field): bool => $field->getName() === 'question');
+
+    expect($questionField)->not->toBeNull()
+        ->and($questionField->getMaxLength())->toBe(2000)
+        ->and(FinancialInsightService::MAX_QUESTION_CHARS)->toBe(2000)
+        // Validasi yang dipakai field harus benar-benar menolak > 2000.
+        ->and($questionField->getLengthValidationRules())->toContain('max:2000');
+});
+
+test('pertanyaan melebihi 2000 karakter ditolak validasi dan tidak memanggil API AI', function () {
+    Http::fake([
+        'api.cohere.ai/*' => Http::response(['text' => 'Tidak seharusnya terpanggil.'], 200),
+    ]);
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    RateLimiter::clear('ai-insight:'.$user->id);
+
+    $overLimit = str_repeat('a', FinancialInsightService::MAX_QUESTION_CHARS + 1);
+
+    $component = Livewire::test(Dashboard::class)
+        ->mountAction('askAi')
+        ->setActionData(['question' => $overLimit])
+        ->callMountedAction()
+        ->assertHasActionErrors(['question']);
+
+    // Tidak ada request ke Cohere sama sekali — jadi kuota harian pun utuh.
+    Http::assertNothingSent();
+    expect(RateLimiter::attempts('ai-insight:'.$user->id))->toBe(0);
+
+    // Modal jawaban pun tidak boleh ter-mount untuk input yang ditolak.
+    expect($component->instance()->getMountedActions())->toHaveCount(1)
+        ->and($component->instance()->getMountedAction()->getName())->toBe('askAi');
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+});
+
+test('pertanyaan tepat 2000 karakter TETAP diterima (batas tidak off-by-one)', function () {
+    Http::fake([
+        'api.cohere.ai/*' => Http::response(['text' => 'Baik, pertanyaan diterima.'], 200),
+    ]);
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    RateLimiter::clear('ai-insight:'.$user->id);
+
+    $component = Livewire::test(Dashboard::class)
+        ->mountAction('askAi')
+        ->setActionData(['question' => str_repeat('b', FinancialInsightService::MAX_QUESTION_CHARS)])
+        ->callMountedAction();
+
+    // Bukti validasi LOLOS (batas 2000 tidak off-by-one): aksi benar-benar
+    // dieksekusi sampai selesai sehingga modal "Tanya AI" DIGANTIKAN modal
+    // "Jawaban AI". replaceMountedAction() hanya terpanggil dari dalam aksi,
+    // yaitu SETELAH validasi lolos.
+    //
+    // Catatan: assertion `->assertHasNoActionErrors()` TIDAK bisa dipakai di
+    // sini. Action askAi mengganti dirinya dengan showAiAnswer yang TIDAK punya
+    // schema, sehingga state `mountedActionSchema0` dihapus; assertion itu
+    // membaca state tersebut dan melempar PropertyNotFoundException. Assertion
+    // di bawah justru lebih kuat: ia membuktikan alur penuh berjalan, bukan
+    // sekadar "tidak ada error".
+    expect($component->instance()->getMountedAction()?->getName())->toBe('showAiAnswer');
+
+    // Pertanyaan 2.000 karakter benar-benar terkirim ke Cohere (bukan dipotong
+    // atau di-drop oleh validasi).
+    Http::assertSentCount(1);
+    Http::assertSent(fn ($request): bool => mb_strlen((string) ($request['message'] ?? '')) > 0);
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+});
+
+test('error Cohere 500 TIDAK menghabiskan kuota harian user, tapi limiter per menit tetap mencatat spam', function () {
+    config()->set('services.cohere.daily_limit', 2);
+    config()->set('services.cohere.burst_limit', 30);
+
+    $user = User::factory()->create();
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+
+    // CATATAN PENTING soal Http::fake():
+    // Memanggil Http::fake() lagi TIDAK mengganti stub sebelumnya — stub
+    // ditumpuk dan yang PERTAMA tetap menang (sudah dibuktikan eksperimen:
+    // fake 500 lalu fake 200 -> request tetap dijawab 500 "boom"). Untuk
+    // mensimulasikan provider pulih, responsnya harus dipilih lewat satu
+    // closure yang membaca variabel mode di bawah.
+    $cohereHealthy = false;
+
+    Http::fake([
+        'api.cohere.ai/*' => function () use (&$cohereHealthy) {
+            return $cohereHealthy
+                ? Http::response(['text' => 'Berhasil dijawab.'], 200)
+                : Http::response('boom', 500);
+        },
+    ]);
+
+    $service = app(FinancialInsightService::class);
+
+    // Tiga percobaan gagal (tiap percobaan masih boleh 1 retry di HTTP layer).
+    for ($i = 0; $i < 3; $i++) {
+        $result = $service->ask($user, "Pertanyaan gagal {$i}");
+
+        expect($result->status)->toBe(AiInsightStatus::ProviderError)
+            ->and($result->isProviderFailure())->toBeTrue();
+    }
+
+    // INTI PERUBAHAN: kuota harian tetap 0 meski sudah 3x ditolak Cohere.
+    expect(RateLimiter::attempts('ai-insight:'.$user->id))->toBe(0)
+        // Anti-spam tetap hidup: setiap percobaan (sukses/gagal) dihitung.
+        ->and(RateLimiter::attempts('ai-insight-burst:'.$user->id))->toBe(3);
+
+    // Begitu Cohere kembali sehat, kuota baru terpotong — tepat 1.
+    $cohereHealthy = true;
+
+    $ok = $service->ask($user, 'Pertanyaan berhasil');
+
+    expect($ok->status)->toBe(AiInsightStatus::Answered)
+        ->and(RateLimiter::attempts('ai-insight:'.$user->id))->toBe(1)
+        ->and(RateLimiter::attempts('ai-insight-burst:'.$user->id))->toBe(4);
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+});
+
+test('timeout / connection error juga tidak menghabiskan kuota harian', function () {
+    config()->set('services.cohere.daily_limit', 5);
+
+    $user = User::factory()->create();
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+
+    // Melempar ConnectionException = mensimulasikan timeout / jaringan putus.
+    Http::fake(function (): void {
+        throw new ConnectionException('Connection timed out');
+    });
+
+    $result = app(FinancialInsightService::class)->ask($user, 'Pertanyaan timeout');
+
+    expect($result->status)->toBe(AiInsightStatus::ProviderError)
+        ->and(RateLimiter::attempts('ai-insight:'.$user->id))->toBe(0)
+        ->and(RateLimiter::attempts('ai-insight-burst:'.$user->id))->toBe(1);
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+});
+
+test('limiter per menit memblokir spam beruntun, dan kuota harian TIDAK ikut terpakai', function () {
+    config()->set('services.cohere.daily_limit', 100);
+    config()->set('services.cohere.burst_limit', 3);
+
+    $user = User::factory()->create();
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+
+    Http::fake([
+        'api.cohere.ai/*' => Http::response('boom', 500),
+    ]);
+
+    $service = app(FinancialInsightService::class);
+
+    // 3 percobaan pertama lolos limiter per menit (tetapi semuanya gagal).
+    for ($i = 0; $i < 3; $i++) {
+        expect($service->ask($user, "Spam {$i}")->status)->toBe(AiInsightStatus::ProviderError);
+    }
+
+    // Percobaan ke-4 diblokir limiter per menit — TANPA menyentuh Cohere.
+    $blocked = $service->ask($user, 'Spam ke 4');
+
+    expect($blocked->status)->toBe(AiInsightStatus::TooManyRequests)
+        ->and($blocked->isLimitNotice())->toBeTrue()
+        ->and($blocked->text)->toContain('Terlalu banyak pertanyaan berturut-turut')
+        ->and($blocked->text)->not->toContain('tidak tersedia')
+        // Kuota harian tetap nol: spam tidak dihukum dengan jatah harian.
+        ->and(RateLimiter::attempts('ai-insight:'.$user->id))->toBe(0);
+
+    // Pesan limit dari limiter per menit tetap tampil sebagai "limit" di modal.
+    $this->actingAs($user);
+
+    $component = Livewire::test(Dashboard::class)
+        ->mountAction('askAi')
+        ->setActionData(['question' => 'Spam lewat UI'])
+        ->callMountedAction();
+
+    $mountedAction = $component->instance()->getMountedAction();
+    $arguments = $mountedAction->getArguments();
+
+    expect($mountedAction->getName())->toBe('showAiAnswer')
+        ->and($arguments['isLimit'])->toBeTrue()
+        ->and($arguments['answer'])->toContain('Terlalu banyak pertanyaan berturut-turut')
+        ->and($arguments['answer'])->not->toContain('tidak tersedia');
+
+    expect(actionModalsHtml($component))->toContain('Terlalu banyak pertanyaan berturut-turut');
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+});
+
+test('3.000 expense via factory: prompt di bawah batas ukuran & data user lain tidak bocor', function () {
+    Http::fake([
+        'api.cohere.ai/*' => Http::response(['text' => 'Total pengeluaran Anda Rp 300.000.000.'], 200),
+    ]);
+
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+
+    $categoryIds = collect(['Makanan & Minuman', 'Transportasi', 'Perlengkapan', 'Kesehatan'])
+        ->map(fn (string $label): int => Category::resolveFromLabel($label, $userA->id)->id)
+        ->all();
+
+    // Seed TANPA sesi login supaya user_id eksplisit dari factory tidak ditimpa
+    // hook anti-spoofing Expense::creating (yang memaksa user_id = Auth::id()).
+    // createQuietly() sekaligus melewati event BudgetAlertService supaya 3.000
+    // baris tidak memicu 3.000 pemeriksaan budget.
+    //
+    // `amount` di-PIN jadi 100.000 (mengimpa angka acak dari factory) supaya
+    // totalnya DETERMINISTIK: 3.000 x Rp 100.000 = Rp 300.000.000 persis.
+    // Tanpa pin ini, factory memakai numberBetween() sehingga totalnya acak
+    // setiap run dan assertion total yang tertulis TIDAK AKAN PERNAH bisa
+    // terpenuhi — test jadi bergantung pada-undangan, bukan pada kode.
+    Expense::factory()
+        ->count(3000)
+        ->state([
+            'user_id' => $userA->id,
+            'amount' => 100_000,
+            'category_id' => fn (): int => fake()->randomElement($categoryIds),
+        ])
+        ->createQuietly();
+
+    // Pengguna lain: vendor super unik agar mudah dideteksi kalau bocor.
+    Expense::factory()
+        ->count(25)
+        ->state([
+            'user_id' => $userB->id,
+            'vendor' => 'Toko Rahasia User B',
+        ])
+        ->createQuietly();
+
+    $this->actingAs($userA);
+
+    Livewire::test(Dashboard::class)
+        ->mountAction('askAi')
+        ->setActionData(['question' => 'berapa total pengeluaran saya?'])
+        ->callMountedAction();
+
+    Http::assertSent(function ($request): bool {
+        $message = (string) ($request['message'] ?? '');
+
+        // (1) Di bawah batas ukuran prompt yang dikunci service.
+        return mb_strlen($message) <= FinancialInsightService::MAX_PROMPT_CHARS
+            // (2) SEMUA 3.000 transaksi ikut terhitung (default = seluruh riwayat).
+            //     Jumlah transaksi dicetak sebagai integer polos oleh service
+            //     (format '%d transaksi'), BUKAN dengan pemisah ribuan.
+            && str_contains($message, 'Total pengeluaran SELURUH riwayat: Rp 300.000.000 (3000 transaksi).')
+            // (3) Agregat per tahun & per bulan tetap ada walau transaksi meledak.
+            && str_contains($message, 'Rincian total per tahun:')
+            && str_contains($message, 'Rincian per bulan (agregat,')
+            // (4) Isolasi per-user: data user B tidak boleh muncul sama sekali.
+            && ! str_contains($message, 'Toko Rahasia User B');
+    });
+});
+
+test('3.000 expense: struktur prompt tetap utuh & kuota harian tetap berlaku', function () {
+    config()->set('services.cohere.daily_limit', 2);
+
+    Http::fake([
+        'api.cohere.ai/*' => Http::response(['text' => 'Ringkasan.'], 200),
+    ]);
+
+    $user = User::factory()->create();
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
+
+    Expense::factory()
+        ->count(3000)
+        ->state(['user_id' => $user->id])
+        ->createQuietly();
+
+    $this->actingAs($user);
+
+    $service = app(FinancialInsightService::class);
+
+    for ($i = 0; $i < 2; $i++) {
+        expect($service->ask($user, "Pertanyaan {$i}")->status)->toBe(AiInsightStatus::Answered);
+    }
+
+    // Kuota 2 dari 2 habis → percobaan ketiga diblokir meski datanya besar.
+    expect($service->ask($user, 'Pertanyaan ketiga')->status)->toBe(AiInsightStatus::RateLimited);
+
+    Http::assertSent(function ($request): bool {
+        $message = (string) ($request['message'] ?? '');
+
+        // Kerangka prompt tidak boleh rusak: penanda pembuka & penutup utuh.
+        return str_contains($message, '--- DATA KEUANGAN USER')
+            && str_contains($message, '--- AKHIR DATA ---')
+            && str_contains($message, 'Pertanyaan user:')
+            && str_contains($message, 'Jawaban (teks polos, tanpa markdown):')
+            && mb_strlen($message) <= FinancialInsightService::MAX_PROMPT_CHARS;
+    });
+
+    RateLimiter::clear('ai-insight:'.$user->id);
+    RateLimiter::clear('ai-insight-burst:'.$user->id);
 });

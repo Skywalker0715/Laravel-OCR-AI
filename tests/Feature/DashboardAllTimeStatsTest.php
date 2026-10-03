@@ -123,3 +123,61 @@ test('grafik kategori menghitung dari seluruh expense tanpa filter bulan', funct
     // Semua irisan dijumlahkan = total seluruh expense (semua waktu).
     expect(array_sum($data['datasets'][0]['data']))->toBe(418100.0);
 });
+
+/*
+ * Grafik Dashboard di-rollup per BULAN (TASK 4B butir 6).
+ *
+ * Test di bawah menguncirollup-nya: dua struk di bulan yang sama digabung
+ * jadi SATU titik, dan label sumbu memakai nama bulan ("Juli 2026"). Test
+ * "seluruh riwayat" di atas tetap hijau karena data lamanya kebetulan satu
+ * struk per bulan.
+ */
+
+test('grafik garis menggabungkan expense satu bulan jadi satu titik dengan label bulan', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    // Tiga struk di Juli 2026, satu di Agustus 2026.
+    foreach ([['2026-07-02', 100000], ['2026-07-15', 50000], ['2026-07-28', 25000]] as [$date, $amount]) {
+        Expense::create(['user_id' => $user->id, 'title' => 'Belanja '.$date, 'amount' => $amount, 'date_shopping' => $date]);
+    }
+
+    Expense::create(['user_id' => $user->id, 'title' => 'Belanja Agustus', 'amount' => 70000, 'date_shopping' => '2026-08-03']);
+
+    $data = (new ReflectionMethod(ExpenseLineChart::class, 'getData'))->invoke(new ExpenseLineChart());
+
+    // Dua titik, bukan empat.
+    expect($data['labels'])->toBe(['Juli 2026', 'Agustus 2026'])
+        ->and($data['datasets'][0]['data'])->toBe([175000.0, 70000.0]);
+
+    // Total keseluruhan tetap sama: tidak ada angka yang hilang saat digabung.
+    expect(array_sum($data['datasets'][0]['data']))->toBe(245000.0);
+});
+
+test('jumlah titik grafik tidak ikut bertambah dengan jumlah struk dalam sebulan', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    // 20 struk dalam satu bulan -> tetap SATU titik.
+    foreach (range(1, 20) as $i) {
+        Expense::create([
+            'user_id' => $user->id,
+            'title' => 'Belanja '.$i,
+            'amount' => 10000,
+            'date_shopping' => '2026-04-'.str_pad((string) min($i, 28), 2, '0', STR_PAD_LEFT),
+        ]);
+    }
+
+    $data = (new ReflectionMethod(ExpenseLineChart::class, 'getData'))->invoke(new ExpenseLineChart());
+
+    expect($data['labels'])->toBe(['April 2026'])
+        ->and($data['datasets'][0]['data'])->toBe([200000.0]);
+});
+
+test('heading grafik menyebut perlubannya (per bulan)', function () {
+    $widget = new ExpenseLineChart();
+
+    $heading = (new ReflectionMethod($widget, 'getHeading'))->invoke($widget);
+
+    expect($heading)->toContain('per Bulan');
+});

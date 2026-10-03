@@ -82,10 +82,13 @@ class EditExpense extends EditRecord
             // memakai teks `note` yang baru saja disimpan).
             dispatch(new AIParserJob($record));
         } catch (\Throwable $th) {
+            // `getTraceAsString()` sengaja tidak dilampirkan (TASK 7, sama seperti
+            // CreateExpense): stack trace tidak menambah nilai diagnosa untuk
+            // kegagalan OCR/API ini, sementara argumen fungsi pada frame yang
+            // lebih dalam bisa membocorkan path server ke dalam log.
             Log::error('Gagal memproses OCR/AI saat mengganti foto struk (Edit)', [
                 'expense_id' => $record->id,
                 'error' => $th->getMessage(),
-                'trace' => $th->getTraceAsString(),
             ]);
 
             Notification::make()

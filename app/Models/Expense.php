@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Models\Scopes\OwnedByUserScope;
 use App\Services\BudgetAlertService;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -13,6 +14,9 @@ use Illuminate\Support\Facades\Storage;
 
 class Expense extends Model
 {
+    /** @use HasFactory<\Database\Factories\ExpenseFactory> */
+    use HasFactory;
+
     protected $fillable = [
         'user_id',
         'category_id',

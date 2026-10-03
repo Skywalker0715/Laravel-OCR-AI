@@ -258,3 +258,73 @@ test('aksi export PDF mengembalikan response unduhan yang benar', function () {
     expect($response->headers->get('content-type'))->toBe('application/pdf');
     expect($response->headers->get('content-disposition'))->toContain('laporan-pengeluaran-20260201-20260228.pdf');
 });
+
+/* -------------------------------------------------------------------------
+ * Batas baris detail di PDF (TASK 4B butir 5)
+ *
+ * Baris detail dibatasi 1000 baris, tetapi ringkasan & breakdown kategori
+ * tetap dihitung dari agregat SQL atas SELURUH data hasil filter — bukan dari
+ * baris yang dicetak. Test berikut mengunci kedua sifat itu.
+ * ---------------------------------------------------------------------- */
+
+test('PDF Laporan: ringkasan & breakdown dihitung dari SQL atas seluruh data', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    $makanan = Category::resolveFromLabel('Makanan & Minuman', $user->id);
+    $transport = Category::resolveFromLabel('Transportasi', $user->id);
+
+    createLaporanExpense($user, ['title' => 'A', 'amount' => 10000, 'date_shopping' => '2026-02-01', 'category_id' => $makanan->id]);
+    createLaporanExpense($user, ['title' => 'B', 'amount' => 20000, 'date_shopping' => '2026-02-02', 'category_id' => $makanan->id]);
+    createLaporanExpense($user, ['title' => 'C', 'amount' => 30000, 'date_shopping' => '2026-02-03', 'category_id' => $transport->id]);
+
+    $page = new Laporan;
+    $expenses = $page->filteredExpensesQuery()->orderBy('created_at', 'desc')->get();
+
+    $summary = (new ReflectionMethod($page, 'summarizeFromQuery'))->invoke($page);
+    $breakdown = (new ReflectionMethod($page, 'categoryBreakdown'))->invoke($page, $expenses);
+
+    expect($summary)->toBe(['total' => 60000.0, 'count' => 3, 'average' => 20000.0])
+        // Breakdown urut dari total terbesar.
+        ->and($breakdown->pluck('name')->all())->toBe(['Makanan & Minuman', 'Transportasi'])
+        ->and($breakdown->pluck('count')->all())->toBe([2, 1])
+        ->and($breakdown->pluck('total')->all())->toBe([30000.0, 30000.0]);
+});
+
+test('PDF Laporan: catatan truncation hanya muncul saat baris detail dipotong', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    createLaporanExpense($user, ['title' => 'A', 'amount' => 10000, 'date_shopping' => '2026-02-01']);
+
+    $page = new Laporan;
+    $expenses = $page->filteredExpensesQuery()->orderBy('created_at', 'desc')->get();
+
+    $base = [
+        'periodLabel' => 'Februari 2026',
+        'userName' => $user->name,
+        'generatedAt' => '01/01/2026 00:00',
+        'expenses' => $expenses,
+        'summary' => ['total' => 10000.0, 'count' => 1, 'average' => 10000.0],
+        'categoryBreakdown' => collect(),
+        'detailLimit' => 1000,
+    ];
+
+    $withoutNote = view('exports.laporan-pdf', $base + [
+        'isTruncated' => false,
+        'totalRowCount' => 1,
+    ])->render();
+
+    $withNote = view('exports.laporan-pdf', $base + [
+        'isTruncated' => true,
+        'totalRowCount' => 1500,
+    ])->render();
+
+    expect($withoutNote)->not->toContain('<strong>Catatan:</strong>')
+        ->and($withNote)->toContain('<strong>Catatan:</strong>')
+        // Catatan menyebut jumlah total dan batas baris, serta mengarahkan ke
+        // export Excel yang tidak dibatasi.
+        ->and($withNote)->toContain('1.500')
+        ->and($withNote)->toContain('1.000')
+        ->and($withNote)->toContain('Export Excel');
+});

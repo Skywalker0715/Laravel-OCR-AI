@@ -24,7 +24,9 @@ use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Auth;
 
 class ExpenseResource extends Resource
 {
@@ -280,6 +282,36 @@ class ExpenseResource extends Resource
         // most (again no N+1). We deliberately do NOT add `with('items')` here: the index page
         // doesn't render the items relation, and eagerly hydrating every row's items on the
         // list would only add unused data/query time to the page users load most often.
-        return parent::getEloquentQuery()->withCount(relations: ['items']);
+        //
+        // Kolom "Kategori" (ExpensesTable) memanggil Category::displayColorFor() untuk SETIAP
+        // baris. Method itu menelusuri CategoryAppearanceOverride milik user login, sehingga
+        // TANPA eager-load tiap baris memicu 2 query (1x select categories + 1x select
+        // category_appearance_overrides) — inilah N+1 yang membuat list 5 baris memakai 12
+        // query. Nested eager-load di bawah meredupkan keduanya menjadi 2 query TOTAL untuk
+        // seluruh halaman, berapa pun jumlah barisnya.
+        return parent::getEloquentQuery()
+            ->withCount(relations: ['items'])
+            ->with([
+                // Argumen nested eager-load bertipe Builder ATAU Relation, tergantung
+                // bentuk relasi — jadi tipe keduanya (pola yang sama dengan
+                // App\Filament\Resources\Budgets\Tables\BudgetsTable).
+                'category' => fn (Builder|Relation $categoryQuery): Builder|Relation => $categoryQuery
+                    ->withAppearanceOverridesFor(self::appearanceOverridesUserId()),
+            ]);
+    }
+
+    /**
+     * User login yang dipakai untuk memfilter override tampilan kategori.
+     *
+     * Dipisah jadi method sendiri supaya tipenya tegas (?int) dan supaya test bisa
+     * memanggilnya tanpa perlu tahu bentuk Query Builder-nya. Kode null (mis. dipanggil
+     * dari seeder/console tanpa sesi) diterjemahkan ke null agar scope Category
+     * memakai whereNull('user_id') — perilaku aman, bukan bocor data.
+     */
+    protected static function appearanceOverridesUserId(): ?int
+    {
+        $userId = Auth::id();
+
+        return $userId === null ? null : (int) $userId;
     }
 }

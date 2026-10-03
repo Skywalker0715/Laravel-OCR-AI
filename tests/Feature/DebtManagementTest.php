@@ -210,6 +210,47 @@ test('pembayaran melebihi sisa dipotong ke nominal total & langsung lunas', func
         ->and($debt->remainingAmount())->toBe(0.0);
 });
 
+test('recordPayment membaca ulang baris terkunci — dua instance basi tidak saling menimpa (anti lost-update)', function () {
+    $debt = debtFor(User::factory()->create(), ['amount' => 500000]);
+
+    // Dua "klien" (mis. 2 tab / 2 request) yang sama-sama memuat baris saat
+    // paid_amount masih 0 — snapshot instance $stale tidak pernah diperbarui.
+    $stale = Debt::query()->findOrFail($debt->getKey());
+
+    $debt->recordPayment(100000);   // klien 1 membayar lebih dulu
+    $stale->recordPayment(200000);  // klien 2 (state basi) membayar sesudahnya
+
+    $stale->refresh();
+
+    // Tanpa lock + pembacaan ulang, hasil lama = 200.000 (update klien 1 hilang).
+    expect((float) $stale->paid_amount)->toBe(300000.0)
+        ->and($stale->status)->toBe(Debt::STATUS_SEBAGIAN)
+        ->and($stale->remainingAmount())->toBe(200000.0);
+});
+
+test('pembayaran berurutan dari instance basi tetap ter-clamp & status akhir benar', function () {
+    $debt = debtFor(User::factory()->create(), ['amount' => 250000]);
+
+    // Instance kedua diambil SEBELUM pembayaran pertama (snapshot basi).
+    $stale = Debt::query()->findOrFail($debt->getKey());
+
+    $debt->recordPayment(200000);
+    expect($debt->refresh()->status)->toBe(Debt::STATUS_SEBAGIAN)
+        ->and((float) $debt->paid_amount)->toBe(200000.0);
+
+    // Klien kedua masih mengira belum ada pembayaran sama sekali; nominal
+    // dihitung dari baris terkunci (200.000 + 100.000 = 300.000) lalu di-clamp
+    // hook saving ke nominal total 250.000 → status lunas.
+    $stale->recordPayment(100000);
+
+    $stale->refresh();
+
+    expect((float) $stale->paid_amount)->toBe(250000.0)
+        ->and($stale->status)->toBe(Debt::STATUS_LUNAS)
+        ->and($stale->remainingAmount())->toBe(0.0)
+        ->and($stale->paidPercent())->toBe(100);
+});
+
 test('menandai lunas mengisi paid_amount penuh & mengubah status', function () {
     $debt = debtFor(User::factory()->create(), ['amount' => 275000]);
 

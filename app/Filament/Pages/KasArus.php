@@ -24,6 +24,7 @@ use Filament\Support\Icons\Heroicon;
 use Illuminate\Support\Collection;
 use Maatwebsite\Excel\Excel as ExcelWriter;
 use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
@@ -61,6 +62,19 @@ class KasArus extends Page
      * otomatis menerimanya sebagai $pageFilters (pola sama dengan Laporan).
      */
     public ?array $filters = null;
+
+    /**
+     * Instance KasArusReport yang dipakai selama satu request, plus sidik
+     * filter yang dipakai saat instance itu dibuat.
+     *
+     * Sifatnya SENGJAJA tidak dipersist Livewire (private, bukan public):
+     * tujuannya murni cache satu render, dan filter yang di-cache selalu
+     * dicocokkan ulang lewat filtersSignature() supaya tidak pernah ada
+     * laporan yang tampil memakai filter lama.
+     */
+    private ?KasArusReport $kasArusReportInstance = null;
+
+    private ?string $kasArusReportSignature = null;
 
     public function mount(): void
     {
@@ -197,7 +211,7 @@ class KasArus extends Page
                 ->label('Export Excel')
                 ->icon(Heroicon::OutlinedTableCells)
                 ->color('success')
-                ->action(fn (): StreamedResponse => $this->exportExcel()),
+                ->action(fn (): BinaryFileResponse => $this->exportExcel()),
 
             Action::make('resetFilters')
                 ->label('Reset Filter')
@@ -219,18 +233,53 @@ class KasArus extends Page
     /**
      * Sumber kebenaran laporan — dipakai oleh tabel breakdown (blade view),
      * ringkasan, maupun export PDF/Excel sehingga angkanya selalu identik.
-     * Instance baru tiap panggilan aman karena query-nya ringan dan
-     * KasArusReport sendiri men-cache breakdown per instance-nya.
+     *
+     * Instance di-MEMOIZE per request (lihat $kasArusReportInstance): halaman
+     * ini memanggil method ini dari beberapa tempat sekaligus pada satu
+     * render — blade ($this->monthlyBreakdown() + $this->totals()), export,
+     * dan widget. Tanpa memoize, tiap pemanggilan membuat instance baru,
+     * cache breakdown di dalam KasArusReport jadi tidak pernah terpakai, dan
+     * satu render memicu query berulang (2 per panggilan, bukan 2 total).
      */
     public function kasArusReport(): KasArusReport
     {
-        return new KasArusReport($this->filters ?? []);
+        // Filter bisa berubah di tengah request (mis. lewat updatedFilters),
+        // jadi instance harus dibangun ulang bila state filter berbeda.
+        $signature = $this->filtersSignature();
+
+        if ($this->kasArusReportInstance === null || $this->kasArusReportSignature !== $signature) {
+            $this->kasArusReportInstance = new KasArusReport($this->filters ?? []);
+            $this->kasArusReportSignature = $signature;
+        }
+
+        return $this->kasArusReportInstance;
     }
 
-    /** Filter halaman sebagai objek ReportFilter (periode & label-nya saja). */
+    /**
+     * Filter halaman sebagai objek ReportFilter (periode & label-nya saja).
+     * Dialihkan lewat instance KasArusReport yang sama supaya halaman hanya
+     * punya satu sumber parsing filter.
+     */
     public function reportFilter(): ReportFilter
     {
-        return new ReportFilter($this->filters ?? []);
+        return $this->kasArusReport()->reportFilter();
+    }
+
+    /**
+     * Sidik state filter untuk mengecek apakah instance KasArusReport yang
+     * di-cache masih cocok. Hash dari filter ternormalisasi supaya perubahan
+     * kecil (mis. urutan key) tidak membangun ulang instance.
+     */
+    private function filtersSignature(): string
+    {
+        $filters = $this->filters ?? [];
+        ksort($filters);
+
+        // serialize() (bukan json_encode) dipilih karena tidak pernah gagal
+        // untuk state form: halaman harus tetap ter-render meski ada nilai
+        // filter yang tak terduga, dan nilai tak terduga itu akan tetap
+        // menghasilkan sidik yang berbeda antar nilai.
+        return md5(serialize($filters));
     }
 
     /**
@@ -303,19 +352,21 @@ class KasArus extends Page
     /**
      * Export laporan Kas Arus ke Excel (.xlsx) via maatwebsite/excel —
      * isi file = breakdown + ringkasan dari data yang SAMA dengan layar.
+     *
+     * Memakai Excel::download() (BinaryFileResponse yang di-stream dari
+     * temporary file) bukan Excel::raw() + print(): raw() menahan SELURUH
+     * file .xlsx sebagai string di memori. Breakdown sudah kecil karena
+     * teragregasi per bulan, tapi jalur ini dipakai bersama export lain
+     * dan tidak menambah biaya memori sama sekali.
      */
-    public function exportExcel(): StreamedResponse
+    public function exportExcel(): BinaryFileResponse
     {
         $report = $this->kasArusReport();
 
-        $content = (string) Excel::raw(
+        return Excel::download(
             new KasArusExport($report->monthlyBreakdown(), $report->totals()),
-            ExcelWriter::XLSX,
-        );
-
-        return response()->streamDownload(
-            fn () => print ($content),
             $this->exportFilename('xlsx'),
+            ExcelWriter::XLSX,
             ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
         );
     }

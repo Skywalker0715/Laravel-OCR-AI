@@ -3,7 +3,9 @@
 use App\Filament\Auth\EditProfile;
 use App\Models\Budget;
 use App\Models\Category;
+use App\Models\Debt;
 use App\Models\Expense;
+use App\Models\Income;
 use App\Models\User;
 use App\Services\DeleteUserAccountService;
 use Filament\Facades\Filament;
@@ -16,6 +18,23 @@ uses(RefreshDatabase::class);
 
 test('service DeleteUserAccountService menghapus user & data secara standalone', function () {
     $user = User::factory()->create(['password' => 'password123']);
+
+    // Data milik user LAIN dibuat SEBELUM actingAs: tanpa sesi login, hook
+    // creating tidak menimpa user_id, jadi benar-benar milik user lain.
+    $otherUser = User::factory()->create();
+    $otherIncome = Income::create([
+        'user_id' => $otherUser->id,
+        'source' => 'Pemasukan User Lain',
+        'amount' => 7000000,
+        'date_received' => now()->toDateString(),
+    ]);
+    $otherDebt = Debt::create([
+        'user_id' => $otherUser->id,
+        'type' => Debt::TYPE_UTANG,
+        'counterparty_name' => 'Supplier User Lain',
+        'amount' => 900000,
+    ]);
+
     $this->actingAs($user);
 
     $expense = Expense::create([
@@ -43,6 +62,18 @@ test('service DeleteUserAccountService menghapus user & data secara standalone',
         'year' => now()->year,
     ]);
 
+    // Pemasukan & utang piutang milik user yang dihapus.
+    $income = Income::create([
+        'source' => 'Gaji Bulanan',
+        'amount' => 5000000,
+        'date_received' => now()->toDateString(),
+    ]);
+    $debt = Debt::create([
+        'type' => Debt::TYPE_PIUTANG,
+        'counterparty_name' => 'Pelanggan Warung',
+        'amount' => 300000,
+    ]);
+
     app(DeleteUserAccountService::class)->delete($user);
 
     $this->assertDatabaseMissing('users', ['id' => $user->id]);
@@ -50,6 +81,15 @@ test('service DeleteUserAccountService menghapus user & data secara standalone',
     $this->assertDatabaseMissing('expense_items', ['expenses_id' => $expense->id]);
     $this->assertDatabaseMissing('budgets', ['user_id' => $user->id]);
     $this->assertDatabaseMissing('categories', ['id' => $category->id]);
+
+    // Pemasukan & utang piutang milik user ikut terhapus eksplisit.
+    $this->assertDatabaseMissing('incomes', ['id' => $income->id]);
+    $this->assertDatabaseMissing('debts', ['id' => $debt->id]);
+
+    // Data milik user LAIN tidak boleh tersentuh.
+    $this->assertDatabaseHas('users', ['id' => $otherUser->id]);
+    $this->assertDatabaseHas('incomes', ['id' => $otherIncome->id, 'user_id' => $otherUser->id]);
+    $this->assertDatabaseHas('debts', ['id' => $otherDebt->id, 'user_id' => $otherUser->id]);
 });
 
 test('halaman Profile menampilkan tombol Hapus Akun dan mendaftarkan aksinya', function () {
@@ -63,6 +103,35 @@ test('halaman Profile menampilkan tombol Hapus Akun dan mendaftarkan aksinya', f
         // profile "simple" tidak merender header actions, jadi tombol
         // direalisasikan lewat override content() di App\Filament\Auth\EditProfile.
         ->assertSee('Hapus Akun');
+});
+
+test('modal Hapus Akun menyebut pemasukan & utang piutang pada daftar data yang dihapus', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    // Konten modal Filament dirender lazy (HTML awal hanya wadah kosong
+    // "action-modals"), jadi teks diperiksa lewat schema aksi yang sudah
+    // ter-mount (container-nya sudah terpasang → komponen anak bisa dibaca).
+    $component = Livewire::test(EditProfile::class);
+    $component->mountAction('deleteAccount');
+
+    // Schema aksi yang sudah ter-mount (dibangun Filament dengan container
+    // Livewire-nya, sehingga komponen anak bisa dibaca).
+    $page = $component->instance();
+    $schema = $page->getSchema($page->getMountedActionSchemaName());
+    $section = $schema->getComponents()[0];
+
+    // Deskripsi section (teks peringatan utama di modal).
+    expect($section->getDescription())
+        ->toContain('pemasukan')
+        ->toContain('utang piutang');
+
+    // Butir rincian (Placeholder pertama) juga menyebut keduanya.
+    $placeholder = $section->getChildComponents()[0];
+
+    expect((string) $placeholder->getContent())
+        ->toContain('<strong>pemasukan</strong>')
+        ->toContain('<strong>utang piutang</strong>');
 });
 
 test('modal Hapus Akun menolak email/password yang salah dan akun tetap utuh', function () {

@@ -89,13 +89,18 @@ trait PollsParsingStatus
     abstract protected function onParsingResultsReady(): void;
 
     /**
-     * True bila expense ini masih menunggu hasil parsing: field vendor DAN
-     * amount sama-sama kosong. Job selesai ditandai dengan terisinya minimal
-     * salah satu dari keduanya (lihat AIParserJob::reprocess).
+     * True bila expense ini masih menunggu hasil parsing: punya foto struk
+     * DAN field vendor & amount sama-sama kosong. Job selesai ditandai dengan
+     * terisinya minimal salah satu dari keduanya (lihat AIParserJob::reprocess).
+     *
+     * Syarat foto WAJIB: tanpa `receipt_image` tidak ada job parsing yang pernah
+     * dibuat, jadi expense manual tidak boleh dianggap "menunggu parsing" (lihat
+     * ListExpenses::hasPendingParsingResults()).
      */
     protected static function isExpenseParsingPending(Expense $expense): bool
     {
-        return blank($expense->vendor)
+        return filled($expense->receipt_image)
+            && blank($expense->vendor)
             && (blank($expense->amount) || (float) $expense->amount <= 0);
     }
 }

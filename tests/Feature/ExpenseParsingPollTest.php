@@ -24,11 +24,17 @@ test('halaman List Expense menampilkan badge polling lalu menghentikannya dan me
     $user = User::factory()->create();
     $this->actingAs($user);
 
-    // Expense yang baru dibuat: note OCR sudah ada, tapi hasil parsing
-    // (vendor/amount) belum terisi karena AIParserJob masih berjalan async.
+    // Expense yang baru dibuat: foto struk terpasang, note OCR sudah ada, tapi
+    // hasil parsing (vendor/amount) belum terisi karena AIParserJob masih
+    // berjalan async.
+    //
+    // receipt_image WAJIB diisi: since AIParserJob hanya di-dispatch bila ada
+    // foto struk (lihat CreateExpense::afterCreate()), expense tanpa foto
+    // tidak mungkin punya parsing yang tertunda.
     $expense = Expense::create([
         'user_id' => $user->id,
         'title' => 'Struk Jaya (polling list)',
+        'receipt_image' => 'receipts/struk-list.jpg',
         'note' => <<<'TXT'
         Karis Jaya Shop
         Jl. Diponegoro 1, Sby
@@ -67,9 +73,11 @@ test('halaman View Expense menampilkan badge polling lalu berhenti dan langsung 
     $user = User::factory()->create();
     $this->actingAs($user);
 
+    // receipt_image wajib terisi — parsing hanya berjalan untuk struk BERFOTO.
     $expense = Expense::create([
         'user_id' => $user->id,
         'title' => 'Struk Jaya (polling view)',
+        'receipt_image' => 'receipts/struk-view.jpg',
         'note' => <<<'TXT'
         Karis Jaya Shop
         Jl. Diponegoro 1, Sby
@@ -100,6 +108,48 @@ test('halaman View Expense menampilkan badge polling lalu berhenti dan langsung 
         ->assertViewHas('isWaitingForParsing', false);
 });
 
+test('expense TANPA foto struk (belanja manual) tidak memicu badge polling di List', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    // Belanja manual: tanpa foto struk, vendor & total sengaja DIISI user
+    // sendiri. Syarat "vendor & amount kosong" saja sudah terpenuhi di sini —
+    // tanpa syarat receipt_image, badge & wire:poll 3 detik akan menyala untuk
+    // expense yang TIDAK PERNAH punya job parsing (AIParserJob hanya
+    // di-dispatch bila receipt_image terisi), sehingga halaman list melakukan
+    // query sia-sia terus-menerus tanpa hasil yang pernah datang.
+    Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Belanja manual (tanpa struk)',
+        'vendor' => null,
+        'amount' => null,
+        'receipt_image' => null,
+    ]);
+
+    Livewire::test(ListExpenses::class)
+        ->assertDontSee('Sedang diproses')
+        ->assertViewHas('isWaitingForParsing', false);
+});
+
+test('expense dengan foto struk tapi parsing belum selesai tetap memicu polling', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    // Kebalikan dari test di atas: struk BERFOTO yang job parsing-nya belum
+    // selesai — badge WAJIB tampil supaya user melihat hasil tanpa refresh.
+    Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Struk foto (parsing jalan)',
+        'vendor' => null,
+        'amount' => null,
+        'receipt_image' => 'receipts/struk.jpg',
+    ]);
+
+    Livewire::test(ListExpenses::class)
+        ->assertSee('Sedang diproses')
+        ->assertViewHas('isWaitingForParsing', true);
+});
+
 test('badge polling tidak tampil sama sekali bila semua expense sudah ter-parse', function () {
     $user = User::factory()->create();
     $this->actingAs($user);
@@ -127,6 +177,7 @@ test('polling berhenti sendiri setelah melewati batas attempt agar tidak membeba
     $expense = Expense::create([
         'user_id' => $user->id,
         'title' => 'Struk gagal parse permanen',
+        'receipt_image' => 'receipts/struk-gagal.jpg',
         'note' => '===',
     ]);
 

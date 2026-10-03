@@ -50,12 +50,23 @@ class ListExpenses extends ListRecords
     }
 
     /**
-     * True bila ada expense milik user yang masih menunggu hasil parsing
-     * (field vendor & amount sama-sama kosong).
+     * True bila ada expense milik user yang MASIH MENUNGGU hasil parsing
+     * AIParserJob (field vendor & amount sama-sama kosong).
+     *
+     * Syarat WAJIB: expense punya foto struk (`receipt_image` terisi).
+     * Tanpa foto tidak ada job parsing yang pernah dibuat — CreateExpense hanya
+     * dispatch AIParserJob di dalam blok `if ($record->receipt_image)`. Expense
+     * TANPA foto adalah belanja manual: nilainya sudah diisi user sendiri, dan
+     * membiarkan badge "Sedang diproses..." + wire:poll 3 detik menyala untuk
+     * expense manual membuat halaman list melakukan query sia-sia terus-menerus
+     * (beban server) tanpa hasil yang pernah datang.
      */
     protected function hasPendingParsingResults(): bool
     {
         return Expense::query()
+            // Hanya struk BERFOTO yang bisa punya job parsing tertunda.
+            ->whereNotNull('receipt_image')
+            ->where('receipt_image', '!=', '')
             ->where(fn ($query) => $query->whereNull('vendor')->orWhere('vendor', ''))
             ->where(fn ($query) => $query->whereNull('amount')->orWhere('amount', '<=', 0))
             ->exists();

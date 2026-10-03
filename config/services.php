@@ -47,6 +47,15 @@ return [
         'insight_model' => env('COHERE_INSIGHT_MODEL'),
         // Batas harian pertanyaan Tanya AI per user (default 10).
         'daily_limit' => (int) env('AI_INSIGHT_DAILY_LIMIT', 10),
+        // Batas ANTI-SPAM per menit per user (default 30).
+        //
+        // Berbeda sifatnya dengan daily_limit: yang ini DIHIT untuk setiap
+        // percobaan (sukses maupun gagal), sedangkan daily_limit hanya dipotong
+        // kalau Cohere benar-benar menjawab. Nilai ini sengaja LEBIH BESAR dari
+        // daily_limit supaya user yang bertanya cepat tidak terkunci "terlalu
+        // sering" padahal kuota hariannya masih banyak — tugasnya hanya
+        // menahan bot atau klik bertubi-tubi, bukan mengatur jatah harian.
+        'burst_limit' => (int) env('AI_INSIGHT_BURST_LIMIT', 30),
     ],
 
 ];

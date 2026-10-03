@@ -18,8 +18,14 @@ class StatsOverview extends StatsOverviewWidget
     {
         // Hitung dari SELURUH riwayat expense milik user, tanpa filter tanggal
         // apa pun (bukan hanya bulan/tahun berjalan).
-        $total = (float) Expense::query()->sum('amount');
-        $count = Expense::query()->count();
+        //
+        // whereNotNull('amount') dipakai pada TOTAL dan JUMLAH: expense dengan
+        // amount NULL berarti parsing-nya belum selesai / gagal total sehingga
+        // tidak ada nilainya. Kalau ikut terhitung di COUNT, rata-rata jadi
+        // terlalu kecil — sama seperti yang sudah dilakukan
+        // LaporanStatsOverview.
+        $total = (float) Expense::query()->whereNotNull('amount')->sum('amount');
+        $count = Expense::query()->whereNotNull('amount')->count();
         $average = $count > 0 ? $total / $count : 0;
 
         // Format Rupiah terpusat (MoneyFormatter): ribuan titik, desimal koma,

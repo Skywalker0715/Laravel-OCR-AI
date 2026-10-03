@@ -5,6 +5,8 @@ namespace App\Models;
 use App\Models\Scopes\OwnedByUserScope;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 
 /**
@@ -82,25 +84,100 @@ class Budget extends Model
     /**
      * Total pengeluaran terpakai dari anggaran ini: expense pemilik budget pada periode
      * bulan+tahun yang sama (date_shopping), difilter kategori bila budget khusus kategori.
-     * Dihitung per baris — daftar budget realistis hanya belasan baris, biayanya kecil.
+     *
+     * Angka ini dihitung lewat spentAmountsFor() — method yang sama dipakai kolom
+     * "Terpakai" pada tabel Budgets — supaya nilai di tabel, di halaman View Category,
+     * dan di notifikasi budget tidak mungkin berbeda satu rupiah pun.
      */
     public function spentAmount(): float
     {
-        return (float) Expense::query()
-            ->where('user_id', $this->user_id)
+        return (float) (self::spentAmountsFor(collect([$this]))[$this->getKey()] ?? 0.0);
+    }
+
+    /**
+     * Nominal terpakai untuk SEKOLLEKSI budget dengan SATU query agregat — bukan
+     * satu query per baris seperti implementasi lama.
+     *
+     * Cara kerja: satu query GROUP BY (user_id, category_id) dengan satu kolom
+     * SUM() kondisional untuk SETIAP periode bulan/tahun yang muncul di halaman.
+     * Jadi berapa pun jumlah baris tabel, jumlah query tetap satu.
+     *
+     * Perbandingan periode memakai rentang tanggal (BETWEEN awal–akhir bulan)
+     * sehingga kondisi WHERE tetap sargable dan dapat memakai index
+     * expenses(user_id, date_shopping). Versi lama memakai whereYear()/whereMonth()
+     * yang membungkus kolom tanggal di dalam fungsi — index tidak terpakai.
+     *
+     * @param  Collection<int, Budget>  $budgets  budget yang sedang ditampilkan
+     * @return array<int|string, float>  peta id budget => nominal terpakai
+     */
+    public static function spentAmountsFor(Collection $budgets): array
+    {
+        if ($budgets->isEmpty()) {
+            return [];
+        }
+
+        // Periode unik yang muncul di halaman; setiap periode jadi satu kolom SUM.
+        $periods = $budgets
+            ->map(fn (Budget $budget): string => sprintf('%04d-%02d', $budget->year, $budget->month))
+            ->unique()
+            ->values();
+
+        $selects = [];
+        $bindings = [];
+
+        foreach ($periods as $index => $period) {
+            $month = Carbon::createFromFormat('Y-m', $period);
+
+            $selects[] = 'SUM(CASE WHEN date_shopping BETWEEN ? AND ? THEN amount ELSE 0 END) AS spent_'.$index;
+            $bindings[] = $month->copy()->startOfMonth()->toDateString();
+            $bindings[] = $month->copy()->endOfMonth()->toDateString();
+        }
+
+        $rows = Expense::query()
+            ->whereIn('user_id', $budgets->pluck('user_id')->unique()->values()->all())
             // Expense dengan amount NULL (parsing gagal total) tidak ikut dihitung.
             ->whereNotNull('amount')
-            ->when(
-                $this->category_id !== null,
-                // Budget khusus kategori: hanya expense kategori tsb yang terhitung.
-                fn ($query) => $query
-                    ->where('category_id', $this->category_id)
-                    ->whereNotNull('category_id'),
-            )
-            // Hanya expense bertanggal dalam periode budget (date_shopping).
+            // Hanya expense bertanggal (date_shopping) yang bisa masuk periode budget.
             ->whereNotNull('date_shopping')
-            ->whereYear('date_shopping', $this->year)
-            ->whereMonth('date_shopping', $this->month)
-            ->sum('amount');
+            ->select('user_id', 'category_id')
+            ->selectRaw(implode(', ', $selects), $bindings)
+            ->groupBy('user_id', 'category_id')
+            ->get();
+
+        // [user_id][category_id] => baris agregat. category_id NULL (expense tanpa
+        // kategori) ikut punya barisnya sendiri karena GROUP BY nullable.
+        $byCategory = [];
+
+        foreach ($rows as $row) {
+            $byCategory[(int) $row->user_id][$row->category_id === null ? null : (int) $row->category_id] = $row;
+        }
+
+        $spent = [];
+
+        foreach ($budgets as $budget) {
+            $period = sprintf('%04d-%02d', $budget->year, $budget->month);
+            $periodIndex = $periods->search($period);
+
+            if ($periodIndex === false) {
+                $spent[$budget->getKey()] = 0.0;
+
+                continue;
+            }
+
+            $column = 'spent_'.$periodIndex;
+            $userCategories = $byCategory[(int) $budget->user_id] ?? [];
+
+            $spent[$budget->getKey()] = $budget->category_id !== null
+                // Budget khusus kategori: hanya baris kategori itu.
+                ? (float) ($userCategories[(int) $budget->category_id]->{$column} ?? 0)
+                // Budget umum ("Semua kategori"): jumlah SEMUA kategori pada
+                // periode itu — himpunan barisnya sama persis dengan query lama.
+                : array_sum(array_map(
+                    fn (object $row): float => (float) ($row->{$column} ?? 0),
+                    array_values($userCategories),
+                ));
+        }
+
+        return $spent;
     }
 }

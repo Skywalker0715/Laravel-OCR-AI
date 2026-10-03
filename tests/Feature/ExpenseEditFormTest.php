@@ -4,6 +4,7 @@ use App\Filament\Resources\Expenses\Pages\EditExpense;
 use App\Jobs\AIParserJob;
 use App\Models\Expense;
 use App\Models\User;
+use App\Support\MoneyFormatter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -210,6 +211,194 @@ test('mengganti foto struk di form Edit tetap memicu re-parsing otomatis (OCR + 
 
     // Bersihkan file yang dibuat test dari disk fake 'receipts'.
     Storage::disk('receipts')->delete(['receipts/baru.jpg', 'receipts/original.jpg']);
+});
+
+/*
+ * Batas atas input nominal (MoneyFormatter::MAX_INPUT_AMOUNT).
+ *
+ * Kolom uang di database (expenses.change & expense_items.qty/price/subtotal)
+ * bertipe decimal(14,2). Tanpa ->maxValue() di form, user bisa mengetik angka
+ * berapapun lalu PostgreSQL melempar SQLSTATE[22003] "numeric field overflow" —
+ * yaitu error TEKNIS yang tidak bisa ditindaklanjuti user. Dengan batas atas,
+ * input ekstrem ditolak lebih dulu dengan PESAN VALIDASI yang ramah.
+ */
+
+test('field Kembalian menolak nominal ekstrem dengan pesan validasi, bukan error SQL', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    Storage::fake('receipts');
+    Storage::disk('receipts')->put('receipts/sample.jpg', 'dummy-receipt');
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Belanja overflow',
+        'receipt_image' => 'receipts/sample.jpg',
+    ]);
+
+    $tooBig = (string) (MoneyFormatter::MAX_INPUT_AMOUNT + 1);
+
+    Livewire::test(EditExpense::class, ['record' => $expense->getKey()])
+        ->fillForm(['title' => 'Belanja overflow', 'change' => $tooBig])
+        ->call('save')
+        // Ditolak di level validasi form — bukan sampai ke query yang error.
+        ->assertHasFormErrors(['change']);
+
+    // Nilai DIAM di database: record lama tidak ikut tertimpa.
+    expect($expense->fresh()->change)->toBeNull();
+});
+
+test('field qty/price/subtol pada Repeater menolak nilai ekstrem dengan pesan validasi', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    Storage::fake('receipts');
+    Storage::disk('receipts')->put('receipts/sample.jpg', 'dummy-receipt');
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Belanja item overflow',
+        'receipt_image' => 'receipts/sample.jpg',
+    ]);
+
+    $tooBig = (string) (MoneyFormatter::MAX_INPUT_AMOUNT + 1);
+
+    // Tiga field monetary item diuji sekaligus karena semuanya memakai batas
+    // yang sama; cukup satu assert error per field untuk membuktikan guard aktif.
+    Livewire::test(EditExpense::class, ['record' => $expense->getKey()])
+        ->set('data.items', [
+            [
+                'name' => 'Barang A',
+                'qty' => $tooBig,
+                'price' => 1000,
+                'subtotal' => 1000,
+            ],
+        ])
+        ->call('save')
+        ->assertHasFormErrors(['items.0.qty']);
+
+    // Tidak ada item yang tersimpan sebagai akibatnya.
+    expect($expense->items()->count())->toBe(0);
+});
+
+test('field harga item yang ekstrem ditolak tanpa merusak item lain yang valid', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    Storage::fake('receipts');
+    Storage::disk('receipts')->put('receipts/sample.jpg', 'dummy-receipt');
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Belanja item harga overflow',
+        'receipt_image' => 'receipts/sample.jpg',
+    ]);
+
+    $tooBig = (string) (MoneyFormatter::MAX_INPUT_AMOUNT + 1);
+
+    Livewire::test(EditExpense::class, ['record' => $expense->getKey()])
+        ->set('data.items', [
+            ['name' => 'Barang Murah', 'qty' => 1, 'price' => 1000, 'subtotal' => 1000],
+            ['name' => 'Barang Mahal', 'qty' => 1, 'price' => $tooBig, 'subtotal' => $tooBig],
+        ])
+        ->call('save')
+        ->assertHasFormErrors(['items.1.price']);
+
+    // Validasi gagal = TIDAK ADA perubahan yang ditulis (transaksi save
+    // dibatalkan Filament), termasuk untuk item yang nilainya valid.
+    expect($expense->items()->count())->toBe(0);
+});
+
+/*
+ * Field teknis (note & parsed_data) tidak boleh ikut ter-dehydrate saat form
+ * disimpan. Keduanya diisi otomatis oleh CreateExpense/EditExpense (OCR) dan
+ * AIParserJob (parsing AI) — bukan oleh user lewat form.
+ *
+ * ->dehydrated(false) menutup jalur "field tersembunyi ikut menimpa kolom":
+ * tanpa itu, form.edit yang kebetulan punya state kosong/berubah pada field ini
+ * akan menimpa teks OCR & JSON parsing AI yang sudah ada. Test di bawah locking
+ * KONFIGURASINYA (bukan hanya perilaku), karena dengan state yang memang sama
+ * nilainya, round-trip note/parsed_data kebetulan terlihat utuh meski tanpa flag
+ * — jadi test perilaku biasa tidak bisa membedakan.
+ */
+test('field note dan parsed_data dikonfigurasi tidak ikut ter-dehydrate', function () {
+    $schema = Livewire::test(EditExpense::class, [
+        'record' => Expense::create([
+            'user_id' => User::factory()->create()->id,
+            'title' => 'Belanja Konfigurasi',
+        ])->getKey(),
+    ])->instance()->getSchema('form');
+
+    // Catatan: Filament punya aturan bawaan `dehydratedWhenHidden` (default
+    // false) yang membuat field tersembunyi otomatis TIDAK ikut dehydrate.
+    // ->dehydrated(false) pada field note/parsed_data membuat jaminan itu
+    // EKSPLISIT & tidak bergantung pada default vendor — kalau suatu saat field
+    // ini diubah jadi tidak-hidden, atau default Filament berubah, teks OCR &
+    // JSON parsing AI tetap aman dari penimpaan NULL.
+    //
+    // PENTING: ->getComponents(withHidden: true) — note & parsed_data memang
+    // disembunyikan, jadi daftar default sengaja tidak memuat keduanya.
+    // Keduanya diletakkan di root schema (lihat App\Filament\Resources\
+    // Expenses\Schemas\ExpenseForm), jadi tidak perlu rekursi ke Section.
+    // Urutan pemeriksaan penting: Section & friends tidak punya getName(), jadi
+    // nama field dicek DULU (dengan aman) baru method isDehydrated.
+    $technicalFields = ['note', 'parsed_data'];
+
+    $fields = array_values(array_filter(
+        $schema->getComponents(withHidden: true),
+        fn ($component) => method_exists($component, 'getName')
+            && in_array($component->getName(), $technicalFields, true)
+            && method_exists($component, 'isDehydrated'),
+    ));
+
+    // Kedua field teknis harus benar-benar ada di form (kalau tidak, test ini
+    // hanya membandingkan Apples dengan oranges).
+    expect($fields)->toHaveCount(2)
+        ->and(array_map(fn ($field): string => $field->getName(), $fields))
+        ->toEqualCanonicalizing(['note', 'parsed_data']);
+
+    foreach ($fields as $field) {
+        // Kontrak utama: field teknis tidak pernah ikut terkirim saat save.
+        expect($field->isDehydrated())->toBeFalse();
+    }
+});
+
+test('menyimpan form Edit tidak menghapus note (teks OCR) dan parsed_data yang sudah ada', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    Storage::fake('receipts');
+    Storage::disk('receipts')->put('receipts/sample.jpg', 'dummy-receipt');
+
+    $expense = Expense::create([
+        'user_id' => $user->id,
+        'title' => 'Belanja Gamma',
+        'vendor' => 'Toko Lama',
+        'receipt_image' => 'receipts/sample.jpg',
+        'note' => "TOKO LAMA\nTotal Rp 45.000",
+        'parsed_data' => [['name' => 'Item A', 'qty' => 1, 'price' => 45000, 'subtotal' => 45000]],
+    ]);
+
+    // fillForm HANYA mengisi field yang tampil (judul & vendor). Field note &
+    // parsed_data yang tersembunyi tidak ikut — keduanya tidak boleh tersentuh.
+    Livewire::test(EditExpense::class, ['record' => $expense->getKey()])
+        ->fillForm([
+            'title' => 'Belanja Gamma',
+            'vendor' => 'Toko Baru',
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    $expense->refresh();
+
+    expect($expense->vendor)->toBe('Toko Baru')
+        ->and($expense->note)->toBe("TOKO LAMA\nTotal Rp 45.000")
+        ->and($expense->parsed_data)->toBe([[
+            'name' => 'Item A',
+            'qty' => 1,
+            'price' => 45000,
+            'subtotal' => 45000,
+        ]]);
 });
 
 /**

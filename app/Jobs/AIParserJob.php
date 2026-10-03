@@ -11,6 +11,7 @@ use App\Services\Helper;
 use App\Services\OCRService;
 use App\Services\Parsing\AdjustmentLinesExplainer;
 use App\Services\Parsing\ItemHallucinationDetector;
+use App\Support\LogSanitizer;
 use App\Support\MoneyFormatter;
 use Filament\Actions\Action;
 use Filament\Notifications\Notification;
@@ -18,6 +19,7 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -88,6 +90,15 @@ class AIParserJob implements ShouldQueue
 
         $this->helper = app(Helper::class);
 
+        // Snapshot nilai baris saat job MULAI. Job memegang salinan baris dari
+        // saat start, sedangkan user bisa mengedit vendor/total lewat request
+        // lain sementara job berjalan — snapshot ini dipakai untuk mendeteksi
+        // perubahan tersebut sebelum menulis hasil parsing (lihat penyimpanan
+        // di bawah). Dibaca sebagai string agar perbandingan nominal desimal
+        // tidak terkena selisih pembulatan float.
+        $originalVendor = (string) $record->vendor;
+        $originalAmount = (string) $record->amount;
+
         // Pastikan ada teks untuk diparse: bila `note` kosong atau forceReocr,
         // jalankan OCR ulang dari foto struk yang tersimpan.
         $note = (string) ($record->note ?? '');
@@ -96,7 +107,8 @@ class AIParserJob implements ShouldQueue
         }
         $record->note = $note ?: null;
 
-        Log::info('Raw note text: '.$note);
+        // Isi `note` = hasil OCR mentah (data pribadi user) -> debug + excerpt.
+        Log::debug('Teks note/OCR (excerpt): '.LogSanitizer::excerpt($note));
 
         // 1) Parse lewat AI (Cohere) dengan fallback regex otomatis di dalamnya.
         // Instance disimpan agar jalur yang dipakai (AI vs Fallback) bisa
@@ -110,7 +122,11 @@ class AIParserJob implements ShouldQueue
         }
 
         $parsingPath = $parser->usedFallback ? 'FALLBACK REGEX' : 'AI (COHERE)';
-        Log::info('Parsed data (jalur: '.$parsingPath.') untuk record '.$record->id.': '.json_encode($parsed));
+        // Jalur parsing (AI vs fallback) tetap info karena itu informasi operasional
+        // yang dibutuhkan admin; ISI hasil parsing-nya (vendor/total/item milik
+        // user) dipindah ke debug + excerpt supaya tidak masuk log production.
+        Log::info('AIParserJob memproses record '.$record->id.' lewat jalur: '.$parsingPath);
+        Log::debug('Data hasil parsing (excerpt): '.LogSanitizer::jsonExcerpt($parsed));
         $parsed = is_array($parsed) ? $parsed : [];
 
         $lines = array_values(array_filter(array_map('trim', explode("\n", $note))));
@@ -203,93 +219,196 @@ class AIParserJob implements ShouldQueue
         $categoryLabel = $parsed['category'] ?? Category::inferCategoryName($vendor);
         $category = Category::resolveFromLabel($categoryLabel, $record->user_id);
 
-        // 3) Simpan di kesempatan pertama agar partial result tidak hilang; nilai uang
-        // di-guard batas kolom (migration 2026_09_03_000001) — angka tak wajar hasil
-        // parsing di-NULL-kan + warning agar save() tetap sukses (title & foto tersimpan).
-        $record->vendor = $vendor !== '' ? $vendor : null;
-
-        // Tanggal belanja hasil parse hanya diisi bila kolom masih kosong/NULL -
-        // tanggal yang SUDAH ditetapkan user manual (saat create, form Edit, atau
-        // reprocess "Proses Ulang") tidak ditimpa oleh hasil parse. Prinsip
-        // manual-field override, konsisten dengan kategori di bawah: job TIDAK
-        // menimpa field yang sudah punya nilai dari user.
-        if (blank($record->date_shopping)) {
-            $record->date_shopping = $date;
-        }
-        $record->amount = $this->sanitizeMoneyForColumn(
-            $amount, 'expenses.amount', self::MAX_EXPENSE_AMOUNT, $record->id
-        );
-        $record->change = $this->sanitizeMoneyForColumn(
-            $change, 'expenses.change', self::MAX_EXPENSE_CHANGE, $record->id
-        );
-        $record->parsed_data = $items;
-
-        // Kategori hasil parse (tebakan AI "category" maupun fallback regex) hanya
-        // diisi bila kolom category_id masih kosong/NULL. User yang SUDAH memilih
-        // kategori manual saat create, form Edit, atau reprocess "Proses Ulang"
-        // TIDAK boleh ditimpa oleh tebakan AI. Prinsip sama dengan date_shopping:
-        // job tidak menimpa field yang sudah punya nilai dari user.
-        if (blank($record->category_id)) {
-            $record->category_id = $category?->id;
-        }
-        // Simpan juga jalur parsing yang dipakai (true = fallback regex,
-        // false = AI Cohere). Dipakai halaman View Expense untuk menampilkan
-        // notice informasi "diproses otomatis" tanpa memanggil API lagi.
-        // Cast (bool) eksplisit: nilai yang terikat ke PostgreSQL harus
-        // boolean asli, bukan integer 1/0 (kolom bertipe boolean).
-        $record->used_fallback = (bool) $parser->usedFallback;
-
-        // Guard mismatch item vs Total (jalur AI & fallback): OCR kadang salah
-        // membaca item (mis. dua baris terbaca identik) sehingga SUM(subtotal
-        // item) tidak cocok dengan Total. Flag items_mismatch menandai struk
-        // tersebut agar halaman View Expense menampilkan peringatan cek manual.
-        // Nilai pembanding memakai amount final yang tersimpan di record
-        // (hasil Guard Total di atas, sudah lewat sanitize kolom) — bila
-        // sanitize meng-NULL-kan amount, tidak ada pembanding berarti → false.
-        $record->items_mismatch = $this->detectItemsTotalMismatch(
-            items: $items,
-            amount: (float) ($record->amount ?? 0),
-            lines: $lines,
-            expenseId: $record->id,
-        );
+        // 3) Simpan hasil parsing & ganti item dalam SATU transaksi.
+        //
+        // Nilai yang BENAR-BENAR tersimpan bisa berbeda dari hasil parsing bila
+        // user mengedit vendor/total selama job berjalan — dipakai untuk pesan
+        // hasil & notifikasi di bawah.
+        $storedVendor = $vendor !== '' ? $vendor : null;
+        $storedAmount = $amount;
 
         try {
-            $record->save();
-            Log::info('Record saved for id: '.$record->id.' (amount='.$amount.')');
-        } catch (\Throwable $e) {
-            Log::error('Gagal menyimpan record id '.$record->id.': '.$e->getMessage());
-        }
+            DB::transaction(function () use (
+                $record,
+                $items,
+                $amount,
+                $vendor,
+                $date,
+                $change,
+                $category,
+                $parser,
+                $lines,
+                $originalVendor,
+                $originalAmount,
+                &$storedVendor,
+                &$storedAmount,
+            ): void {
+                // Baca ulang baris TERBARU dari DB (job memegang salinan dari
+                // saat start). Inilah dasar deteksi edit user di tengah proses.
+                $latest = Expense::query()
+                    ->withoutGlobalScopes()
+                    ->whereKey($record->getKey())
+                    ->first();
 
-        // 4) Simpan item struktur — hapus dulu yang lama agar reprocess tidak
-        //    menumpuk baris dobel. Baris tidak valid/negatif dilewati.
-        $record->items()->delete();
-        foreach ($items as $item) {
-            if (! is_array($item) || empty($item['name'])) {
-                continue;
-            }
-            try {
-                // Guard qty/price/subtotal terhadap batas kolom decimal(14,2)
-                // (migration 2026_09_03_000001): nilai tidak wajar disimpan
-                // NULL + warning, bukan membuat INSERT item gagal total.
-                $record->items()->create([
-                    'name' => (string) ($item['name'] ?? 'Item'),
-                    'qty' => $this->sanitizeMoneyForColumn(
-                        max(0, (float) ($item['qty'] ?? 1)), 'expense_items.qty', self::MAX_ITEM_MONEY, $record->id
-                    ),
-                    'price' => $this->sanitizeMoneyForColumn(
-                        max(0, (float) ($item['price'] ?? 0)), 'expense_items.price', self::MAX_ITEM_MONEY, $record->id
-                    ),
-                    'subtotal' => $this->sanitizeMoneyForColumn(
-                        max(0, (float) ($item['subtotal'] ?? 0)), 'expense_items.subtotal', self::MAX_ITEM_MONEY, $record->id
-                    ),
-                ]);
-            } catch (\Throwable $e) {
-                Log::error('Gagal membuat item untuk record '.$record->id.': '.$e->getMessage());
-            }
+                if ($latest === null) {
+                    // Baris sudah dihapus saat job berjalan → jangan menulis
+                    // apa pun; transaksi dibatalkan & user diberi notifikasi gagal.
+                    throw new \RuntimeException(
+                        'Expense '.$record->getKey().' sudah tidak ada saat hasil parsing akan disimpan.'
+                    );
+                }
+
+                // Vendor & Total: JANGAN timpa bila user sudah mengubahnya
+                // selama job berjalan (bandingkan snapshot awal job dengan DB
+                // sekarang). Bila tidak berubah, hasil parsing tetap dipakai —
+                // termasuk alur "Proses Ulang" yang memang memperbarui total.
+                // Prinsip manual-override ini konsisten dengan date/category.
+                $userEditedVendor = (string) $latest->vendor !== $originalVendor;
+                $userEditedAmount = (string) ($latest->amount ?? '') !== $originalAmount;
+
+                if ($userEditedVendor) {
+                    Log::warning(sprintf(
+                        'Guard Edit User (record %d): vendor diubah user saat job berjalan ("%s") — hasil parsing "%s" TIDAK dipakai.',
+                        $record->id,
+                        (string) $latest->vendor,
+                        $vendor,
+                    ));
+
+                    // $record->vendor sengaja TIDAK disentuh: nilainya masih sama
+                    // dengan snapshot → tidak dirty → Eloquent tidak menulisnya,
+                    // sehingga koreksi user di DB tetap utuh.
+                    $storedVendor = $latest->vendor !== null ? (string) $latest->vendor : null;
+                } else {
+                    $record->vendor = $vendor !== '' ? $vendor : null;
+                }
+
+                if ($userEditedAmount) {
+                    Log::warning(sprintf(
+                        'Guard Edit User (record %d): total diubah user saat job berjalan (%s) — hasil parsing %s TIDAK dipakai.',
+                        $record->id,
+                        (string) $latest->amount,
+                        number_format($amount, 2, '.', ''),
+                    ));
+
+                    $storedAmount = (float) $latest->amount;
+                } else {
+                    // Nilai uang di-guard batas kolom (migration
+                    // 2026_09_03_000001) — angka tak wajar hasil parsing
+                    // di-NULL-kan + warning agar save() tetap sukses.
+                    $record->amount = $this->sanitizeMoneyForColumn(
+                        $amount, 'expenses.amount', self::MAX_EXPENSE_AMOUNT, $record->id
+                    );
+                }
+
+                // Tanggal belanja hasil parse hanya diisi bila kolom masih
+                // kosong/NULL - tanggal yang SUDAH ditetapkan user manual (saat
+                // create, form Edit, atau reprocess "Proses Ulang") tidak ditimpa
+                // oleh hasil parse. Prinsip manual-field override, konsisten
+                // dengan kategori di bawah: job TIDAK menimpa field yang sudah
+                // punya nilai dari user.
+                if (blank($record->date_shopping)) {
+                    $record->date_shopping = $date;
+                }
+
+                $record->change = $this->sanitizeMoneyForColumn(
+                    $change, 'expenses.change', self::MAX_EXPENSE_CHANGE, $record->id
+                );
+                $record->parsed_data = $items;
+
+                // Kategori hasil parse (tebakan AI "category" maupun fallback
+                // regex) hanya diisi bila kolom category_id masih kosong/NULL.
+                // User yang SUDAH memilih kategori manual saat create, form
+                // Edit, atau reprocess "Proses Ulang" TIDAK boleh ditimpa oleh
+                // tebakan AI. Prinsip sama dengan date_shopping: job tidak
+                // menimpa field yang sudah punya nilai dari user.
+                if (blank($record->category_id)) {
+                    $record->category_id = $category?->id;
+                }
+
+                // Simpan juga jalur parsing yang dipakai (true = fallback regex,
+                // false = AI Cohere). Dipakai halaman View Expense untuk
+                // menampilkan notice informasi "diproses otomatis" tanpa
+                // memanggil API lagi. Cast (bool) eksplisit: nilai yang terikat
+                // ke PostgreSQL harus boolean asli, bukan integer 1/0.
+                $record->used_fallback = (bool) $parser->usedFallback;
+
+                // Guard mismatch item vs Total (jalur AI & fallback): OCR kadang
+                // salah membaca item (mis. dua baris terbaca identik) sehingga
+                // SUM(subtotal item) tidak cocok dengan Total. Flag
+                // items_mismatch menandai struk tersebut agar halaman View
+                // Expense menampilkan peringatan cek manual. Nilai pembanding
+                // memakai nominal FINAL yang benar-benar dipakai: hasil parsing,
+                // atau nominal milik user bila user mengeditnya saat job berjalan.
+                $record->items_mismatch = $this->detectItemsTotalMismatch(
+                    items: $items,
+                    amount: $userEditedAmount ? (float) $latest->amount : (float) ($record->amount ?? 0),
+                    lines: $lines,
+                    expenseId: $record->id,
+                );
+
+                $record->save();
+                Log::info('Record saved for id: '.$record->id.' (amount='.$storedAmount.')');
+
+                // 4) Simpan item struktur — hapus dulu yang lama agar reprocess
+                //    tidak menumpuk baris dobel. Baris tidak valid/negatif
+                //    dilewati. Penghapusan & pembuatan item berada di transaksi
+                //    YANG SAMA dengan save() di atas, sehingga kegagalan di
+                //    langkah mana pun me-rollback keduanya: item lama tidak
+                //    pernah hilang dan record tidak setengah berubah.
+                $record->items()->delete();
+
+                foreach ($items as $item) {
+                    if (! is_array($item) || empty($item['name'])) {
+                        continue;
+                    }
+
+                    try {
+                        // Guard qty/price/subtotal terhadap batas kolom
+                        // decimal(14,2) (migration 2026_09_03_000001): nilai
+                        // tidak wajar disimpan NULL + warning, bukan membuat
+                        // INSERT item gagal total.
+                        $record->items()->create([
+                            'name' => (string) ($item['name'] ?? 'Item'),
+                            'qty' => $this->sanitizeMoneyForColumn(
+                                max(0, (float) ($item['qty'] ?? 1)), 'expense_items.qty', self::MAX_ITEM_MONEY, $record->id
+                            ),
+                            'price' => $this->sanitizeMoneyForColumn(
+                                max(0, (float) ($item['price'] ?? 0)), 'expense_items.price', self::MAX_ITEM_MONEY, $record->id
+                            ),
+                            'subtotal' => $this->sanitizeMoneyForColumn(
+                                max(0, (float) ($item['subtotal'] ?? 0)), 'expense_items.subtotal', self::MAX_ITEM_MONEY, $record->id
+                            ),
+                        ]);
+                    } catch (\Throwable $e) {
+                        // Item tunggal yang tetap gagal (mis. error DB) dicatat
+                        // lalu dilewati — perilaku lama dipertahankan. Bila
+                        // database menandai transaksi gagal, seluruh transaksi
+                        // ini akan rollback saat commit (fail-safe).
+                        Log::error('Gagal membuat item untuk record '.$record->id.': '.$e->getMessage());
+                    }
+                }
+            });
+        } catch (\Throwable $e) {
+            // Save / penggantian item gagal → transaksi sudah di-rollback
+            // (item lama utuh & record tidak berubah). Kirim notifikasi GAGAL,
+            // BUKAN notifikasi sukses, dan jangan lanjut ke langkah berikutnya.
+            Log::error('Gagal menyimpan hasil parsing record '.$record->id.': '.$e->getMessage());
+
+            $this->notifyParsingFailed($record);
+
+            return [
+                'ok' => false,
+                'note' => 'Gagal menyimpan hasil parsing — data sebelumnya tidak diubah.',
+            ];
         }
 
         // 5) Indikator kegagalan total: tidak ada nominal maupun info tersisa.
-        $extractable = $amount > 0 || ($vendor !== null && $vendor !== '') || $date !== null || count($items) > 0;
+        // Memakai nilai yang BENAR-BENAR tersimpan di record (bisa milik user
+        // bila vendor/total dieditnya saat job berjalan), bukan hasil parsing.
+        $extractable = $storedAmount > 0
+            || ($storedVendor !== null && $storedVendor !== '')
+            || $date !== null
+            || count($items) > 0;
 
         // Notifikasi hasil parsing (sukses AI / fallback / gagal total). Peringatan
         // budget tidak dikirim dari sini — Expense::saved memanggil BudgetAlertService,
@@ -299,8 +418,8 @@ class AIParserJob implements ShouldQueue
         return [
             'ok' => $extractable,
             'note' => $extractable
-                ? 'Selesai. Total '.MoneyFormatter::format($amount).
-                    ($vendor !== '' ? ' di '.$vendor : '').
+                ? 'Selesai. Total '.MoneyFormatter::format($storedAmount).
+                    ($storedVendor !== null && $storedVendor !== '' ? ' di '.$storedVendor : '').
                     ($date ? ' ('.$date.')' : '')
                 : 'Parsing gagal total — tidak ada data yang bisa diekstrak.',
         ];
@@ -639,6 +758,38 @@ class AIParserJob implements ShouldQueue
         }
 
         $notification->sendToDatabase($user);
+    }
+
+    /**
+     * Notifikasi kegagalan SIMPAN hasil parsing — berbeda dari "gagal ekstrak"
+     * di notifyParsingResult(). Transaksi penyimpanan sudah di-rollback sehingga
+     * record & item lama tetap utuh, tapi user harus tahu hasil parsing TIDAK
+     * tersimpan dan bisa mengisi manual. Pesan ke user sengaja tidak memuat isi
+     * exception (detail teknis cukup di log).
+     */
+    private function notifyParsingFailed(Expense $record): void
+    {
+        $user = $record->user_id ? User::find($record->user_id) : null;
+        if (! $user) {
+            Log::warning('Tidak dapat mengirim notifikasi gagal simpan (user tidak ditemukan) untuk record '.$record->id);
+
+            return;
+        }
+
+        $title = $record->title ?: ($record->vendor ?: 'Struk');
+
+        Notification::make()
+            ->danger()
+            ->title("Struk {$title} gagal disimpan otomatis — data lama tidak diubah")
+            ->body('Hasil pembacaan struk tidak berhasil disimpan karena kendala teknis. Data dan item yang sudah ada sebelumnya TIDAK dihapus; silakan periksa dan lengkapi manual bila perlu.')
+            ->persistent()
+            ->actions([
+                Action::make('edit')
+                    ->label('Isi Manual')
+                    ->button()
+                    ->url(self::editExpenseUrl($record)),
+            ])
+            ->sendToDatabase($user);
     }
 
     /**

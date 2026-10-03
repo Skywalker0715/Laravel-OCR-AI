@@ -8,10 +8,14 @@ use App\Models\Expense;
 use App\Models\Income;
 use App\Models\User;
 use App\Support\AiAnswerSanitizer;
+use App\Support\AiInsightResult;
+use App\Support\LogSanitizer;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
@@ -45,6 +49,110 @@ class FinancialInsightService
      * terpotong lebih cepat dan tidak pernah memenuhi layar.
      */
     private const MAX_ANSWER_TOKENS = 400;
+
+    /**
+     * Batas panjang pertanyaan (karakter).
+     *
+     * Dipakai dua kali: sebagai ->maxLength() di field form (penolakan di
+     * sisi UI, sebelum request dikirim) dan sebagai pengaman di sisi service
+     * supaya service tetap aman bila dipanggil dari command/queue yang tidak
+     * melewati validasi Filament.
+     */
+    public const MAX_QUESTION_CHARS = 2000;
+
+    /**
+     * Batas ukuran TOTAL prompt (karakter) yang boleh dikirim ke Cohere.
+     *
+     * Dipakai sebagai jaring pengaman: agregasi utama sudah dipindah ke SQL
+     * GROUP BY + LIMIT (lihat buildExpenseSummary()) sehingga ringkasan tidak
+     * ikut membesar secara linear dengan jumlah transaksi, tapi user dengan
+     * ribuan kategori/vendor tetap mungkin menghasilkan ringkasan panjang.
+     * 12.000 karakter ≈ 3.000 token — jauh di bawah limit konteks Cohere, tapi
+     * cukup untuk seluruh ringkasan agregat.
+     *
+     * Nilainya public (bukan private) supaya test bisa mengunci batas ini.
+     */
+    public const MAX_PROMPT_CHARS = 12000;
+
+    /**
+     * Pengaman: system prompt + header + pertanyaan + kerangka teks tidak
+     * boleh melebihi batas. Sisanya jadi jatah untuk ringkasan data.
+     */
+    private const PROMPT_SKELETON_RESERVE = 260;
+
+    /**
+     * Jatah minimum untuk ringkasan data. Bila system prompt + pertanyaan
+     * sendiri sudah memakan hampir seluruh batas, ringkasan tetap boleh
+     * memakai 1.500 karakter (cukup untuk semua baris TOTAL) daripada nol.
+     */
+    private const MIN_SUMMARY_CHARS = 1500;
+
+    /**
+     * Timeout per percobaan (detik).
+     *
+     * Dulu 60 detik — untuk fitur "tanya angka" itu terlalu lama: user
+     * menunggu dengan tombol submit terkunci dan tidak bisa membatalkan.
+     * 20 detik masih jauh di atas waktu respons normal Cohere, tapi membuat
+     * worst case tetap enak ditahan: 20 + 0,5 (jeda retry) + 20 = 40,5 detik,
+     * di bawah ambang 45 detik yang disepakati.
+     */
+    private const REQUEST_TIMEOUT_SECONDS = 20;
+
+    /** Timeout koneksi TCP (detik) — terpisah dari timeout total request. */
+    private const CONNECT_TIMEOUT_SECONDS = 5;
+
+    /**
+     * Jumlah TOTAL percobaan (bukan jumlah retry): 2 = satu kali retry.
+     *
+     * Retry hanya dilakukan untuk 429/5xx/gagal koneksi (lihat shouldRetry()).
+     * 4xx lain (mis. 401 karena API key salah) sengaja TIDAK di-retry karena
+     * pasti gagal dan hanya memperpanjang waktu tunggu user.
+     */
+    private const MAX_ATTEMPTS = 2;
+
+    /** Jeda sebelum percobaan ulang (milidetik). */
+    private const RETRY_SLEEP_MS = 500;
+
+    /**
+     * Prefix key RateLimiter.
+     *
+     * DUA limiter dengan sengaja dipisah (lihat ask()):
+     *  - 'daily'  → kuota harian, hanya dipotong bila Cohere benar-benar
+     *                menjawab sehingga error server TIDAK menghabiskan kuota user;
+     *  - 'burst'  → anti-spam per menit, dipotong untuk SETIAP percobaan.
+     */
+    private const DAILY_LIMIT_KEY_PREFIX = 'ai-insight:';
+
+    private const BURST_LIMIT_KEY_PREFIX = 'ai-insight-burst:';
+
+    /** Umur key limiter harian (detik) = 1 hari. */
+    private const DAILY_LIMIT_DECAY = 86400;
+
+    /** Umur key limiter per menit (detik). */
+    private const BURST_LIMIT_DECAY = 60;
+
+    /**
+     * Ekspresi SQL untuk "nama kategori" saat agregasi. LEFT JOIN ke categories
+     * membuat expense tanpa kategori bernilai NULL, dan ini diterjemahkan jadi
+     * label yang sama seperti versi PHP sebelumnya.
+     */
+    private const CATEGORY_BUCKET_EXPRESSION = "COALESCE(categories.name, 'Tanpa Kategori')";
+
+    /** Ekspresi SQL untuk "nama vendor" saat agregasi (string kosong → label). */
+    private const VENDOR_BUCKET_EXPRESSION = "COALESCE(NULLIF(expenses.vendor, ''), 'Tanpa Nama Vendor')";
+
+    /** Ekspresi SQL untuk "sumber pemasukan" saat agregasi. */
+    private const INCOME_SOURCE_EXPRESSION = "COALESCE(NULLIF(incomes.source, ''), 'Tanpa Sumber')";
+
+    /** Jumlah baris untuk daftar "top N" (kategori, vendor, sumber pemasukan). */
+    private const TOP_N = 5;
+
+    /**
+     * Penanda yang ditambahkan saat ringkasan harus dipotong agar muat ke batas
+     * prompt. Sengaja eksplisit supaya AI tahu ada rincian yang TIDAK dikirim
+     * dan tidak mengarang angka untuk mengisinya.
+     */
+    private const TRUNCATION_NOTICE = '... (sebagian rincian dipotong agar muat ke batas ukuran prompt; angka total di atas tetap utuh)';
 
     /**
      * Pesan fallback yang ditampilkan ke user bila jawaban AI terdeteksi
@@ -95,25 +203,78 @@ class FinancialInsightService
         9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember',
     ];
 
-    public function ask(User $user, string $question): string
+    /**
+     * Jawab pertanyaan user dengan data keuangannya.
+     *
+     * Mengembalikan AiInsightResult (DTO), bukan string polos: pemanggil
+     * memeriksa status-nya untuk menata modal, bukan menebak dari isi teks.
+     * Teks yang ditampilkan ke user TIDAK berubah sama sekali.
+     *
+     * DESAIN DUA LIMITER (penting — lihat komentar tiap bagian):
+     *
+     *  1. LIMITER HARIAN ("ai-insight:{id}") = kuota yang dijanjikan ke user
+     *     ("10 pertanyaan per hari"). Dulu key ini di-hit SEBELUM request,
+     *     sehingga Cohere yang sedang 5xx atau timeout tetap memakan kuota:
+     *     user bisa kehilangan 10 kuota dalam 10 menit tanpa pernah mendapat
+     *     satu jawaban pun. Sekarang key ini di-hit SESUDAH Cohere benar-benar
+     *     menjawab — jadi kegagalan di sisi server/timeout tidak menghabiskan
+     *     kuota harian user.
+     *
+     *  2. LIMITER PER MENIT ("ai-insight-burst:{id}") = anti-spam, di-hit untuk
+     *     SETIAP percobaan sebelum request. Ini yang menutup celah yang dibuat
+     *     oleh (1): kalau error tidak lagi memotong kuota harian, tanpa limiter
+     *     kedua user (atau bot) bisa menembak endpoint ini tanpa batas dan
+     *     membanjiri Cohere dengan request yang semuanya pasti gagal.
+     *
+     * Jadi: kuota harian = keadilan (user tidak dirugikan karena server salah),
+     * limiter per menit = proteksi (server tidak dibanjiri kalau dipanggil
+     * terus-menerus). Keduanya per-user, jadi isolasi antar user terjaga.
+     */
+    public function ask(User $user, string $question): AiInsightResult
     {
-        $limit = (int) config('services.cohere.daily_limit', 10);
-        $key = 'ai-insight:'.$user->id;
+        $question = trim($question);
 
-        if (RateLimiter::tooManyAttempts($key, $limit)) {
-            $seconds = RateLimiter::availableIn($key);
-            $timeText = $seconds >= 3600
-                ? (int) ceil($seconds / 3600).' jam'
-                : max(1, (int) ceil($seconds / 60)).' menit';
+        // Pengaman service-level. Jalur UI (Dashboard) sudah menolak lebih dulu
+        // lewat ->maxLength(), tapi service ini juga bisa dipanggil dari
+        // command/queue yang tidak lewat validasi Filament.
+        if (mb_strlen($question) > self::MAX_QUESTION_CHARS) {
+            $question = mb_substr($question, 0, self::MAX_QUESTION_CHARS);
+        }
 
-            return sprintf(
-                'Batas pertanyaan harian tercapai (%d dari %d). Bisa tanya lagi dalam %s.',
-                $limit,
-                $limit,
-                $timeText
+        $dailyKey = self::DAILY_LIMIT_KEY_PREFIX.$user->id;
+        $dailyLimit = $this->dailyLimit();
+
+        if (RateLimiter::tooManyAttempts($dailyKey, $dailyLimit)) {
+            $retryAfter = RateLimiter::availableIn($dailyKey);
+
+            return AiInsightResult::rateLimited(
+                sprintf(
+                    'Batas pertanyaan harian tercapai (%d dari %d). Bisa tanya lagi dalam %s.',
+                    $dailyLimit,
+                    $dailyLimit,
+                    $this->humanizeSeconds($retryAfter)
+                ),
+                $retryAfter
             );
         }
-        RateLimiter::hit($key, 86400);
+
+        // Anti-spam: diperiksa & dipotong untuk setiap percobaan, termasuk
+        // percobaan yang nanti gagal — justru itulah gunanya.
+        $burstKey = self::BURST_LIMIT_KEY_PREFIX.$user->id;
+        $burstLimit = $this->burstLimit();
+
+        if (RateLimiter::tooManyAttempts($burstKey, $burstLimit)) {
+            $retryAfter = RateLimiter::availableIn($burstKey);
+
+            return AiInsightResult::tooManyRequests(
+                sprintf(
+                    'Terlalu banyak pertanyaan berturut-turut. Bisa coba lagi dalam %s.',
+                    $this->humanizeSeconds($retryAfter)
+                ),
+                $retryAfter
+            );
+        }
+        RateLimiter::hit($burstKey, self::BURST_LIMIT_DECAY);
 
         // RETRIEVAL: tentukan cakupan data (periode/kategori/jenis) dari
         // pertanyaan SEBELUM membangun ringkasan — default tanpa filter =
@@ -124,9 +285,11 @@ class FinancialInsightService
 
         try {
             $response = Http::withToken(config('services.cohere.api_key'))
-                ->connectTimeout(5)
-                ->timeout(60)
-                ->retry(2, 500, $this->shouldRetry(...), false)
+                ->connectTimeout(self::CONNECT_TIMEOUT_SECONDS)
+                ->timeout(self::REQUEST_TIMEOUT_SECONDS)
+                // 2 percobaan = 1 retry. Worst case 20 + 0,5 + 20 = 40,5 detik,
+                // jauh di bawah 45 detik (dulu 60 + 0,5 + 60 = 120,5 detik).
+                ->retry(self::MAX_ATTEMPTS, self::RETRY_SLEEP_MS, $this->shouldRetry(...), false)
                 ->post('https://api.cohere.ai/v1/chat', [
                     'model' => $model,
                     'message' => $this->buildPrompt($summary, $question, $filters),
@@ -138,23 +301,67 @@ class FinancialInsightService
                 ]);
 
             if (! $response->successful()) {
-                Log::error('Cohere insight gagal: '.$response->body());
+                // Body error dipotong (bisa memuat sebagian pertanyaan/data yang dikirim).
+                Log::error('Cohere insight gagal: '.LogSanitizer::excerpt($response->body()));
 
-                return 'Maaf, sistem sedang bermasalah. Coba lagi nanti.';
+                // Sengaja TIDAK menyentuh limiter harian: request ini tidak
+                // menghasilkan jawaban apa pun untuk user.
+                return AiInsightResult::providerError('Maaf, sistem sedang bermasalah. Coba lagi nanti.');
             }
 
             $raw = trim((string) ($response->json('text') ?? $response->json('message.content.0.text') ?? ''));
             if ($raw === '') {
-                return 'Maaf, tidak mendapat respons dari AI.';
+                return AiInsightResult::emptyResponse('Maaf, tidak mendapat respons dari AI.');
             }
+
+            // Satu-satunya tempat kuota harian dipotong: kita sudah benar-benar
+            // mendapat jawaban dari Cohere, jadi user memang sudah memakai satu
+            // hak bertanya hari ini.
+            RateLimiter::hit($dailyKey, self::DAILY_LIMIT_DECAY);
 
             // VALIDASI + pembersihan sebelum jawaban sampai ke user.
             return $this->guardAnswer($raw, $user, $question);
         } catch (Throwable $e) {
             Log::warning('Cohere insight error: '.$e->getMessage());
 
-            return 'Maaf, sistem sedang bermasalah. Coba lagi nanti.';
+            // Timeout / connection error juga tidak memotong kuota harian.
+            return AiInsightResult::providerError('Maaf, sistem sedang bermasalah. Coba lagi nanti.');
         }
+    }
+
+    /** Kuota "Tanya AI" per user per hari (config services.cohere.daily_limit). */
+    private function dailyLimit(): int
+    {
+        return max(1, (int) config('services.cohere.daily_limit', 10));
+    }
+
+    /**
+     * Batas anti-spam per menit. Sengaja DIBERIKAN NILAI LEBIH BESAR dari kuota
+     * harian: kalau limiter ini lebih kecil, user justru terkunci "terlalu
+     * sering" padahal kuota hariannya masih jauh plenty — dan tidak ada orang
+     * yang berhalasan bertanya 31 kali dalam 1 menit.
+     *
+     * Justru inilah alasan limiter per menit tidak bisa menggantikan kuota
+     * harian: nilainya terlalu longgar untuk menahan spam (user bisa tetap
+     * menembak puluhan kali per menit selama jendela 60 detik berjalan),
+     * sementara terlalu ketat untuk dipakai sebagai jatah harian yang adil.
+     */
+    private function burstLimit(): int
+    {
+        return max(1, (int) config('services.cohere.burst_limit', 30));
+    }
+
+    /**
+     * Ubah sisa detik limiter menjadi bahasa manusia ("45 menit", "2 jam"),
+     * dengan floor 1 menit supaya tidak pernah tampil "0 menit".
+     */
+    private function humanizeSeconds(int $seconds): string
+    {
+        if ($seconds >= 3600) {
+            return (int) ceil($seconds / 3600).' jam';
+        }
+
+        return max(1, (int) ceil($seconds / 60)).' menit';
     }
 
     /**
@@ -405,11 +612,19 @@ class FinancialInsightService
     }
 
     /**
-     * Ringkasan pengeluaran sesuai filter. TANPA filter (periode & kategori
-     * sama-sama null) memakai format LAMA persis — seluruh riwayat, agregat
-     * per tahun + per kategori + jendela 12 bulan terakhir — supaya konsisten
-     * dengan widget StatsOverview Dashboard dan test regresi yang mengunci
-     * formatnya. DENGAN filter, hanya baris di luar cakupan yang dibuang.
+     * Ringkasan pengeluaran sesuai filter.
+     *
+     * SEMUA agregasi di method ini & turunannya dijalankan lewat SQL
+     * GROUP BY, bukan dengan memuat baris expense ke memori lalu
+     * groupBy() di PHP. Alasannya skalanya: user dengan 3.000 transaksi
+     * berarti 3.000 objek Eloquent (plus relasi category) ditarik hanya untuk
+     * diringkas jadi belasan baris — kerja sia-sia yang juga menahan
+     * memory_limit pada shared hosting murah. Dengan GROUP BY, database yang
+     * melakukan pekerjaannya dan yang kembali ke aplikasi hanya SEJUMBAR
+     * AGREGAT (per tahun/bulan/kategori/vendor).
+     *
+     * Format output sengaja dipertahankan persis seperti sebelumnya agar
+     * regresi test lama & prompt yang sudah "mengenal" model tetap berlaku.
      *
      * @param  array{
      *     period: ?array{start: Carbon, end: Carbon, label: string},
@@ -420,38 +635,176 @@ class FinancialInsightService
      */
     private function buildExpenseSummary(User $user, array $filters): string
     {
+        $base = $this->expenseBaseQuery($user, $filters);
+
+        if ($filters['period'] === null && $filters['categories'] === null) {
+            return $this->buildUnfilteredExpenseSummary($base);
+        }
+
+        return $this->buildFilteredExpenseSummary($user, $base, $filters);
+    }
+
+    /**
+     * Query dasar expense: sudah dibatasi ke user + filter periode/kategori
+     * yang terdeteksi.
+     *
+     * where('user_id') ditulis eksplisit (di samping global scope
+     * OwnedByUserScope) supaya ringkasan tetap benar walau service dipanggil
+     * di luar konteks request user yang sedang login (mis. command/queue).
+     */
+    private function expenseBaseQuery(User $user, array $filters): Builder
+    {
         $period = $filters['period'];
         $categories = $filters['categories'];
 
-        $query = Expense::query()
-            // where('user_id') eksplisit (di samping global scope OwnedByUserScope)
-            // supaya ringkasan tetap benar walau service dipanggil di luar
-            // konteks request user yang sedang login (mis. command/queue).
-            ->where('user_id', $user->id)
-            ->select(['id', 'amount', 'date_shopping', 'category_id', 'vendor'])
-            ->with('category:id,name');
-
-        if ($period !== null) {
-            // Transaksi tanpa tanggal (date_shopping NULL) otomatis gugur di
-            // whereBetween — jumlahnya dilaporkan terpisah di ringkasan.
-            $query->whereBetween('date_shopping', [
+        // SETIAP kolom ditulis qualified (expenses.*) karena query ini nanti
+        // digabung LEFT JOIN ke categories — dan kedua tabel punya kolom
+        // 'user_id', sehingga tanpa qualify SQL jadi "ambiguous column name".
+        return Expense::query()
+            ->where('expenses.user_id', $user->id)
+            ->when($period !== null, fn (Builder $query): Builder => $query->whereBetween('expenses.date_shopping', [
+                // Transaksi tanpa tanggal (date_shopping NULL) otomatis gugur di
+                // whereBetween — jumlahnya dilaporkan terpisah di ringkasan.
                 $period['start']->toDateString(),
                 $period['end']->toDateString(),
-            ]);
-        }
-
-        if ($categories !== null) {
-            $query->whereIn('category_id', $categories->pluck('id'));
-        }
-
-        $expenses = $query->get();
-
-        if ($period === null && $categories === null) {
-            return $this->buildUnfilteredExpenseSummary($expenses);
-        }
-
-        return $this->buildFilteredExpenseSummary($user, $expenses, $filters);
+            ]))
+            ->when($categories !== null, fn (Builder $query): Builder => $query->whereIn('expenses.category_id', $categories->pluck('id')));
     }
+
+    /**
+     * Ekspresi SQL untuk mengekstrak bagian tanggal dari sebuah kolom.
+     *
+     * Aplikasi berjalan di PostgreSQL (production) sedangkan test memakai
+     * SQLite, dan fungsi tanggal keduanya berbeda — dulu ini jadi alasan
+     * agregasi dibiarkan di PHP. Sekarang ekspresinya dipilih saat runtime,
+     * tapi ketiga cabang menghasilkan TEKS dengan format identik ('2025',
+     * '2025-03', '2025-03-15') sehingga sisa kode tidak perlu tahu bedanya.
+     *
+     * @param  string  $part  'year' | 'month' | 'day'
+     */
+    private function dateExpression(string $column, string $part): string
+    {
+        $pattern = match ($part) {
+            'year' => 'YYYY',
+            'month' => 'YYYY-MM',
+            default => 'YYYY-MM-DD',
+        };
+
+        // Pola strftime()/date_format() memakai penanda % yang berbeda.
+        $slashedPattern = str_replace(['YYYY', 'MM', 'DD'], ['%Y', '%m', '%d'], $pattern);
+
+        return match (DB::connection()->getDriverName()) {
+            'pgsql' => sprintf("to_char(%s, '%s')", $column, $pattern),
+            'mysql', 'mariadb' => sprintf("date_format(%s, '%s')", $column, $slashedPattern),
+            default => sprintf("strftime('%s', %s)", $slashedPattern, $column),
+        };
+    }
+
+    /**
+     * Total keseluruhan expense dalam cakupan query: jumlah transaksi, total
+     * nominal, serta rentang tanggal tertua–terbaru.
+     *
+     * Tanggal diambil lewat dateExpression() (bukan MIN()/MAX() mentah) karena
+     * kolom `date` di SQLite disimpan sebagai DATETIME — MIN() tanpa format
+     * akan mengembalikan "2017-05-02 00:00:00", sedangkan di PostgreSQL
+     * hanya "2017-05-02". dateExpression() merapikan keduanya jadi format sama.
+     */
+    private function expenseTotals(Builder $query): object
+    {
+        $day = $this->dateExpression('expenses.date_shopping', 'day');
+
+        return (clone $query)->toBase()
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(expenses.amount), 0) as total_amount')
+            ->selectRaw('MIN('.$day.') as min_date')
+            ->selectRaw('MAX('.$day.') as max_date')
+            ->first();
+    }
+
+
+    /**
+     * Agregasi expense per bucket tanggal (tahun / bulan / hari) via GROUP BY.
+     *
+     * @param  string  $part  'year' | 'month' | 'day'
+     * @return Collection<int, object> baris: {bucket, transaction_count, total_amount}
+     */
+    private function expenseRowsByDateBucket(Builder $query, string $part): Collection
+    {
+        $expression = $this->dateExpression('expenses.date_shopping', $part);
+
+        return (clone $query)
+            ->whereNotNull('expenses.date_shopping')
+            ->toBase()
+            ->selectRaw($expression.' as bucket')
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(expenses.amount), 0) as total_amount')
+            ->groupByRaw($expression)
+            ->orderByRaw($expression)
+            ->get();
+    }
+
+    /**
+     * Agregasi expense per (bucket tanggal x kategori) — dipakai untuk blok
+     * "Rincian per tahun & kategori" dan "Rincian per bulan".
+     *
+     * Diurutkan bucket menaik lalu total terbesar lebih dulu di dalam satu
+     * bucket, meniru urutan groupByCategory() yang lama (nominal turun).
+     *
+     * @param  string  $part  'year' | 'month'
+     * @return Collection<int, object> baris: {bucket, category_bucket, transaction_count, total_amount}
+     */
+    private function expenseRowsByDateBucketAndCategory(Builder $query, string $part): Collection
+    {
+        $expression = $this->dateExpression('expenses.date_shopping', $part);
+
+        return (clone $query)
+            ->whereNotNull('expenses.date_shopping')
+            ->toBase()
+            ->leftJoin('categories', 'categories.id', '=', 'expenses.category_id')
+            ->selectRaw($expression.' as bucket')
+            ->selectRaw(self::CATEGORY_BUCKET_EXPRESSION.' as category_bucket')
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(expenses.amount), 0) as total_amount')
+            ->groupByRaw($expression)
+            ->groupByRaw(self::CATEGORY_BUCKET_EXPRESSION)
+            ->orderByRaw($expression)
+            ->orderByRaw('total_amount DESC')
+            ->get();
+    }
+
+    /**
+     * Agregasi expense per kelompok bebas (kategori / vendor).
+     *
+     * $limit dipakai untuk daftar "top N": database yang memotong baris,
+     * bukan PHP — inilah yang membuat ringkasan tidak ikut membesar bersama
+     * jumlah vendor unik milik user.
+     *
+     * @param  string  $expression  Ekspresi SQL untuk nama kelompok.
+     * @param  int|null  $limit  Batas baris, null = semua.
+     * @return Collection<int, object> baris: {bucket, transaction_count, total_amount}
+     */
+    private function expenseRowsByGroup(Builder $query, string $expression, ?int $limit = null): Collection
+    {
+        return (clone $query)
+            ->toBase()
+            ->leftJoin('categories', 'categories.id', '=', 'expenses.category_id')
+            ->selectRaw($expression.' as bucket')
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(expenses.amount), 0) as total_amount')
+            ->groupByRaw($expression)
+            ->orderByRaw('total_amount DESC')
+            ->when($limit !== null, fn ($builder) => $builder->limit($limit))
+            ->get();
+    }
+
+    /**
+     * Kelompokkan baris agregat berdasarkan bucket-nya. Mempertahankan urutan
+     * SQL yang sudah benar (bucket menaik, nominal terbesar lebih dulu di
+     * dalam satu bucket).
+     *
+     * @param  Collection<int, object>  $rows
+     * @return Collection<int|string, Collection<int, object>>
+     */
 
     /**
      * Ringkasan SELURUH riwayat expense — TANPA filter tanggal/kategori apa
@@ -459,34 +812,25 @@ class FinancialInsightService
      * tetap menghitung data lama (mis. transaksi 2017–2024), bukan hanya
      * data terbaru.
      *
-     * Supaya ukuran prompt tetap wajar untuk user dengan RIBUAN transaksi,
-     * data TIDAK dikirim per baris: cukup agregat per tahun + per kategori
-     * (+ top kategori & top vendor).
-     *
-     * Agregasi tahun/kategori dihitung di PHP, bukan SQL, karena fungsi
-     * ekstraksi tahun berbeda antar driver (extract() di PostgreSQL yang
-     * dipakai aplikasi vs strftime() di SQLite yang dipakai test) — hanya
-     * kolom ringan yang diambil, jadi tetap hemat memori.
-     *
-     * @param  Collection<int, Expense>  $expenses
+     * Cakupannya tetap SELURUH riwayat: tidak ada lagi batas 90 hari. Yang
+     * membatasi hanya BENTUK data yang dikirim — agregat per tahun, per bulan
+     * (jendela 12 bulan terakhir), per kategori, dan top vendor — semuanya
+     * dihitung di database dengan GROUP BY/LIMIT.
      */
-    private function buildUnfilteredExpenseSummary(Collection $expenses): string
+    private function buildUnfilteredExpenseSummary(Builder $base): string
     {
         $lines = ['=== PENGELUARAN (EXPENSE) ==='];
 
-        if ($expenses->isEmpty()) {
+        $totals = $this->expenseTotals($base);
+        $count = (int) $totals->transaction_count;
+
+        if ($count === 0) {
             $lines[] = 'Tidak ada data pengeluaran yang tercatat untuk user ini (riwayat kosong).';
 
             return implode("\n", $lines);
         }
 
-        $count = $expenses->count();
-        $total = (float) $expenses->sum('amount');
-
-        // Tanggal belanja bisa NULL (mis. expense lama tanpa tanggal) —
-        // dipisahkan agar pengelompokan per tahun tidak mencampurnya, tetapi
-        // tetap ikut dihitung pada total keseluruhan.
-        $dated = $expenses->filter(fn (Expense $expense): bool => $expense->date_shopping !== null);
+        $total = (float) $totals->total_amount;
 
         $lines[] = sprintf(
             'Total pengeluaran SELURUH riwayat: Rp %s (%d transaksi).',
@@ -498,37 +842,36 @@ class FinancialInsightService
             number_format($total / max(1, $count), 0, ',', '.')
         );
 
-        $byYear = $dated
-            ->groupBy(fn (Expense $expense): string => $expense->date_shopping->format('Y'))
-            ->sortKeys();
+        $byYear = $this->expenseRowsByDateBucket($base, 'year');
 
         if ($byYear->isNotEmpty()) {
             $lines[] = sprintf(
                 'Periode data tercatat: %s s.d. %s (%d tahun berbeda).',
-                $dated->min(fn (Expense $expense): string => $expense->date_shopping->toDateString()),
-                $dated->max(fn (Expense $expense): string => $expense->date_shopping->toDateString()),
+                (string) $totals->min_date,
+                (string) $totals->max_date,
                 $byYear->count()
             );
 
             $lines[] = 'Rincian total per tahun:';
-            foreach ($byYear as $year => $yearExpenses) {
+            foreach ($byYear as $year) {
                 $lines[] = sprintf(
                     '  %s: Rp %s (%d transaksi)',
-                    $year,
-                    number_format((float) $yearExpenses->sum('amount'), 0, ',', '.'),
-                    $yearExpenses->count()
+                    $year->bucket,
+                    number_format((float) $year->total_amount, 0, ',', '.'),
+                    (int) $year->transaction_count
                 );
             }
 
             $lines[] = 'Rincian per tahun & kategori (agregat):';
-            foreach ($byYear as $year => $yearExpenses) {
+            $byYearCategory = $this->groupRowsByBucket($this->expenseRowsByDateBucketAndCategory($base, 'year'));
+            foreach ($byYearCategory as $year => $rows) {
                 $lines[] = "  Tahun $year:";
-                foreach ($this->groupByCategory($yearExpenses) as $categoryName => $categoryExpenses) {
+                foreach ($rows as $row) {
                     $lines[] = sprintf(
                         '    - %s: Rp %s (%d transaksi)',
-                        $categoryName,
-                        number_format((float) $categoryExpenses->sum('amount'), 0, ',', '.'),
-                        $categoryExpenses->count()
+                        $row->category_bucket,
+                        number_format((float) $row->total_amount, 0, ',', '.'),
+                        (int) $row->transaction_count
                     );
                 }
             }
@@ -536,21 +879,27 @@ class FinancialInsightService
 
         // Rincian per BULAN untuk 12 bulan terakhir supaya pertanyaan sejenak
         // "pengeluaran bulan ini / 3 bulan terakhir" tetap bisa dijawab dengan
-        // data (placeholder modal & user cenderung bertanya soal bulan ini).
-        // Agregat per kategori tiap bulan — tetap ringkas karena terbatas 12 bulan.
+        // data (user cenderung bertanya soal bulan ini).
         $monthWindowStart = now()->startOfMonth()->subMonths(11);
         $monthWindowEnd = now()->startOfMonth();
+
         $lines[] = sprintf(
             'Rincian per bulan (agregat, %s s.d. %s; bulan tak tercantum = tidak ada pengeluaran):',
             $monthWindowStart->format('Y-m'),
             $monthWindowEnd->format('Y-m')
         );
-        for ($m = $monthWindowStart->copy(); $m <= $monthWindowEnd; $m->addMonth()) {
-            $monthKey = $m->format('Y-m');
-            $monthExpenses = $dated->filter(fn (Expense $expense): bool => $expense->date_shopping->format('Y-m') === $monthKey
-            );
 
-            if ($monthExpenses->isEmpty()) {
+        $windowed = (clone $base)->whereBetween('expenses.date_shopping', [
+            $monthWindowStart->toDateString(),
+            $monthWindowEnd->copy()->endOfMonth()->toDateString(),
+        ]);
+        $byMonthCategory = $this->groupRowsByBucket($this->expenseRowsByDateBucketAndCategory($windowed, 'month'));
+
+        for ($month = $monthWindowStart->copy(); $month <= $monthWindowEnd; $month->addMonth()) {
+            $monthKey = $month->format('Y-m');
+            $rows = $byMonthCategory->get($monthKey);
+
+            if ($rows === null || $rows->isEmpty()) {
                 $lines[] = "  Bulan {$monthKey}: tidak ada pengeluaran tercatat.";
 
                 continue;
@@ -559,44 +908,44 @@ class FinancialInsightService
             $lines[] = sprintf(
                 '  Bulan %s: Rp %s (%d transaksi)',
                 $monthKey,
-                number_format((float) $monthExpenses->sum('amount'), 0, ',', '.'),
-                $monthExpenses->count()
+
+                number_format((float) $rows->sum('total_amount'), 0, ',', '.'),
+                (int) $rows->sum('transaction_count')
             );
 
-            foreach ($this->groupByCategory($monthExpenses) as $categoryName => $categoryExpenses) {
+            foreach ($rows as $row) {
                 $lines[] = sprintf(
                     '    - %s: Rp %s (%d transaksi)',
-                    $categoryName,
-                    number_format((float) $categoryExpenses->sum('amount'), 0, ',', '.'),
-                    $categoryExpenses->count()
+                    $row->category_bucket,
+                    number_format((float) $row->total_amount, 0, ',', '.'),
+                    (int) $row->transaction_count
                 );
             }
         }
 
         $lines[] = 'Kategori terbesar sepanjang riwayat (top 5):';
-
         $rank = 0;
-        foreach ($this->groupByCategory($expenses)->take(5) as $categoryName => $categoryExpenses) {
+        foreach ($this->expenseRowsByGroup($base, self::CATEGORY_BUCKET_EXPRESSION, self::TOP_N) as $row) {
             $rank++;
             $lines[] = sprintf(
                 '  %d. %s: Rp %s (%d transaksi)',
                 $rank,
-                $categoryName,
-                number_format((float) $categoryExpenses->sum('amount'), 0, ',', '.'),
-                $categoryExpenses->count()
+                $row->bucket,
+                number_format((float) $row->total_amount, 0, ',', '.'),
+                (int) $row->transaction_count
             );
         }
 
         $lines[] = 'Vendor dengan pengeluaran terbesar sepanjang riwayat (top 5):';
         $rank = 0;
-        foreach ($this->groupByVendor($expenses)->take(5) as $vendorName => $vendorExpenses) {
+        foreach ($this->expenseRowsByGroup($base, self::VENDOR_BUCKET_EXPRESSION, self::TOP_N) as $row) {
             $rank++;
             $lines[] = sprintf(
                 '  %d. %s: Rp %s (%d transaksi)',
                 $rank,
-                $vendorName,
-                number_format((float) $vendorExpenses->sum('amount'), 0, ',', '.'),
-                $vendorExpenses->count()
+                $row->bucket,
+                number_format((float) $row->total_amount, 0, ',', '.'),
+                (int) $row->transaction_count
             );
         }
 
@@ -610,8 +959,6 @@ class FinancialInsightService
      * periode di luar yang ditanyakan (mis. pertanyaan "Maret 2025" tidak
      * menyertakan angka 2017/2024 sama sekali).
      *
-     * @param  Collection<int, Expense>  $expenses  data yang sudah ter-sumber
-     *                                              dari query berfilter
      * @param  array{
      *     period: ?array{start: Carbon, end: Carbon, label: string},
      *     categories: ?Collection<int, Category>,
@@ -619,7 +966,7 @@ class FinancialInsightService
      *     debtSubtypes: array<int, string>
      * }  $filters
      */
-    private function buildFilteredExpenseSummary(User $user, Collection $expenses, array $filters): string
+    private function buildFilteredExpenseSummary(User $user, Builder $base, array $filters): string
     {
         $period = $filters['period'];
         $categories = $filters['categories'];
@@ -635,14 +982,16 @@ class FinancialInsightService
 
         $lines = ['=== PENGELUARAN (EXPENSE) — DIFILTER ==='];
 
-        if ($expenses->isEmpty()) {
+        $totals = $this->expenseTotals($base);
+        $count = (int) $totals->transaction_count;
+
+        if ($count === 0) {
             $lines[] = sprintf('Tidak ada data pengeluaran untuk filter %s.', $scope);
 
             return implode("\n", $lines);
         }
 
-        $count = $expenses->count();
-        $total = (float) $expenses->sum('amount');
+        $total = (float) $totals->total_amount;
 
         $lines[] = sprintf(
             'Total pengeluaran %s: Rp %s (%d transaksi).',
@@ -661,11 +1010,15 @@ class FinancialInsightService
             // Transaksi tanpa tanggal tidak lolos whereBetween; laporkan agar
             // AI jujur bilang angkanya mungkin sedikit lebih kecil dari total
             // keseluruhan bila user membandingkan dengan total all-time.
+            // Query sengaja dibangun dari nol (bukan dari $base) TANPA filter
+            // periode: kalau periode ikut dipasang, hasil count-nya selalu 0
+            // karena NULL tidak pernah lolos whereBetween.
             $undated = Expense::query()
                 ->where('user_id', $user->id)
                 ->whereNull('date_shopping')
-                ->when($categories !== null, fn ($q) => $q->whereIn('category_id', $categories->pluck('id')))
+                ->when($categories !== null, fn (Builder $query): Builder => $query->whereIn('category_id', $categories->pluck('id')))
                 ->count();
+
             if ($undated > 0) {
                 $lines[] = sprintf(
                     'Catatan: %d transaksi tanpa tanggal tidak ikut terhitung pada filter periode.',
@@ -678,11 +1031,12 @@ class FinancialInsightService
             $nullCategory = Expense::query()
                 ->where('user_id', $user->id)
                 ->whereNull('category_id')
-                ->when($period !== null, fn ($q) => $q->whereBetween('date_shopping', [
+                ->when($period !== null, fn (Builder $query): Builder => $query->whereBetween('date_shopping', [
                     $period['start']->toDateString(),
                     $period['end']->toDateString(),
                 ]))
                 ->count();
+
             if ($nullCategory > 0) {
                 $lines[] = sprintf(
                     'Catatan: %d transaksi tanpa kategori tidak ikut terhitung pada filter kategori.',
@@ -691,64 +1045,61 @@ class FinancialInsightService
             }
         }
 
-        $dated = $expenses->filter(fn (Expense $expense): bool => $expense->date_shopping !== null);
-
         // Per bulan — rentang filter yang lebar tetap ringkas karena hanya
         // bulan yang benar-benar punya data yang muncul.
-        $byMonth = $dated
-            ->groupBy(fn (Expense $expense): string => $expense->date_shopping->format('Y-m'))
-            ->sortKeys();
         $lines[] = 'Rincian per bulan (hanya bulan yang ada data):';
-        foreach ($byMonth as $monthKey => $monthExpenses) {
+        foreach ($this->expenseRowsByDateBucket($base, 'month') as $row) {
             $lines[] = sprintf(
                 '  Bulan %s: Rp %s (%d transaksi)',
-                $monthKey,
-                number_format((float) $monthExpenses->sum('amount'), 0, ',', '.'),
-                $monthExpenses->count()
+                $row->bucket,
+                number_format((float) $row->total_amount, 0, ',', '.'),
+                (int) $row->transaction_count
             );
         }
 
-        // Per hari untuk periode pendek (≤±34 hari: minggu/bulan) supaya
+        // Per hari untuk periode pendek (<= 34 hari: minggu/bulan) supaya
         // pertanyaan "bulan Maret 2025" bisa dijawab rinci per tanggal.
         if ($period !== null && $period['start']->diffInDays($period['end']) <= 34) {
-            $byDay = $dated
-                ->groupBy(fn (Expense $expense): string => $expense->date_shopping->toDateString())
-                ->sortKeys();
             $lines[] = 'Rincian per hari:';
-            foreach ($byDay as $day => $dayExpenses) {
+            foreach ($this->expenseRowsByDateBucket($base, 'day') as $row) {
                 $lines[] = sprintf(
                     '  %s: Rp %s (%d transaksi)',
-                    $day,
-                    number_format((float) $dayExpenses->sum('amount'), 0, ',', '.'),
-                    $dayExpenses->count()
+                    $row->bucket,
+                    number_format((float) $row->total_amount, 0, ',', '.'),
+                    (int) $row->transaction_count
                 );
             }
         }
 
         $lines[] = 'Rincian per kategori:';
-        foreach ($this->groupByCategory($expenses) as $categoryName => $categoryExpenses) {
+        foreach ($this->expenseRowsByGroup($base, self::CATEGORY_BUCKET_EXPRESSION) as $row) {
             $lines[] = sprintf(
                 '  - %s: Rp %s (%d transaksi)',
-                $categoryName,
-                number_format((float) $categoryExpenses->sum('amount'), 0, ',', '.'),
-                $categoryExpenses->count()
+                $row->bucket,
+                number_format((float) $row->total_amount, 0, ',', '.'),
+                (int) $row->transaction_count
             );
         }
 
         $lines[] = 'Rincian per vendor (top 5):';
         $rank = 0;
-        foreach ($this->groupByVendor($expenses)->take(5) as $vendorName => $vendorExpenses) {
+        foreach ($this->expenseRowsByGroup($base, self::VENDOR_BUCKET_EXPRESSION, self::TOP_N) as $row) {
             $rank++;
             $lines[] = sprintf(
                 '  %d. %s: Rp %s (%d transaksi)',
                 $rank,
-                $vendorName,
-                number_format((float) $vendorExpenses->sum('amount'), 0, ',', '.'),
-                $vendorExpenses->count()
+                $row->bucket,
+                number_format((float) $row->total_amount, 0, ',', '.'),
+                (int) $row->transaction_count
             );
         }
 
         return implode("\n", $lines);
+    }
+
+    private function groupRowsByBucket(Collection $rows): Collection
+    {
+        return $rows->groupBy(fn (object $row): string => (string) $row->bucket);
     }
 
     /**
@@ -769,75 +1120,96 @@ class FinancialInsightService
     {
         $period = $filters['period'];
 
-        $query = Income::query()
-            ->where('user_id', $user->id)
-            ->select(['id', 'amount', 'date_received', 'source']);
+        $base = Income::query()->where('user_id', $user->id);
 
         if ($period !== null) {
-            $query->whereBetween('date_received', [
+            $base->whereBetween('date_received', [
                 $period['start']->toDateString(),
                 $period['end']->toDateString(),
             ]);
         }
 
-        $incomes = $query->get();
         $scope = $period !== null ? 'periode '.$period['label'] : 'SELURUH riwayat';
 
         $lines = ['=== PEMASUKAN (INCOME) ==='];
 
-        if ($incomes->isEmpty()) {
+        $day = $this->dateExpression('incomes.date_received', 'day');
+
+        // Agregasi di SQL (bukan Income::get()) agar jumlah catatan pemasukan
+        // yang bisa mencapai ratusan/ribuan tidak ikut membebani memori.
+        $totals = (clone $base)->toBase()
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(incomes.amount), 0) as total_amount')
+            ->selectRaw('MIN('.$day.') as min_date')
+            ->selectRaw('MAX('.$day.') as max_date')
+            ->first();
+
+        $count = (int) $totals->transaction_count;
+
+        if ($count === 0) {
             $lines[] = sprintf('Tidak ada data pemasukan %s.', $scope);
 
             return implode("\n", $lines);
         }
 
-        $count = $incomes->count();
-        $total = (float) $incomes->sum('amount');
-
         $lines[] = sprintf(
             'Total pemasukan %s: Rp %s (%d catatan).',
             $scope,
-            number_format($total, 0, ',', '.'),
+            number_format((float) $totals->total_amount, 0, ',', '.'),
             $count
         );
 
-        $dated = $incomes->filter(fn (Income $income): bool => $income->date_received !== null);
-        if ($dated->isNotEmpty()) {
+        if ($totals->min_date !== null) {
             $lines[] = sprintf(
                 'Periode data pemasukan: %s s.d. %s.',
-                $dated->min(fn (Income $income): string => $income->date_received->toDateString()),
-                $dated->max(fn (Income $income): string => $income->date_received->toDateString())
+                (string) $totals->min_date,
+                (string) $totals->max_date
             );
         }
 
-        $byYear = $dated
-            ->groupBy(fn (Income $income): string => $income->date_received->format('Y'))
-            ->sortKeys();
+        $yearExpression = $this->dateExpression('incomes.date_received', 'year');
+
+        $byYear = (clone $base)
+            ->whereNotNull('date_received')
+            ->toBase()
+            ->selectRaw($yearExpression.' as bucket')
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(incomes.amount), 0) as total_amount')
+            ->groupByRaw($yearExpression)
+            ->orderByRaw($yearExpression)
+            ->get();
+
         if ($byYear->count() > 1) {
             $lines[] = 'Rincian pemasukan per tahun:';
-            foreach ($byYear as $year => $yearIncomes) {
+            foreach ($byYear as $year) {
                 $lines[] = sprintf(
                     '  %s: Rp %s (%d catatan)',
-                    $year,
-                    number_format((float) $yearIncomes->sum('amount'), 0, ',', '.'),
-                    $yearIncomes->count()
+                    $year->bucket,
+                    number_format((float) $year->total_amount, 0, ',', '.'),
+                    (int) $year->transaction_count
                 );
             }
         }
 
-        $bySource = $incomes
-            ->groupBy(fn (Income $income): string => $income->source ?: 'Tanpa Sumber')
-            ->sortByDesc(fn (Collection $items): float => (float) $items->sum('amount'));
+        $bySource = (clone $base)->toBase()
+            ->selectRaw(self::INCOME_SOURCE_EXPRESSION.' as bucket')
+            ->selectRaw('COUNT(*) as transaction_count')
+            ->selectRaw('COALESCE(SUM(incomes.amount), 0) as total_amount')
+            ->groupByRaw(self::INCOME_SOURCE_EXPRESSION)
+            ->orderByRaw('total_amount DESC')
+            ->limit(self::TOP_N)
+            ->get();
+
         $lines[] = 'Sumber pemasukan terbesar (top 5):';
         $rank = 0;
-        foreach ($bySource->take(5) as $source => $sourceIncomes) {
+        foreach ($bySource as $source) {
             $rank++;
             $lines[] = sprintf(
                 '  %d. %s: Rp %s (%d catatan)',
                 $rank,
-                $source,
-                number_format((float) $sourceIncomes->sum('amount'), 0, ',', '.'),
-                $sourceIncomes->count()
+                $source->bucket,
+                number_format((float) $source->total_amount, 0, ',', '.'),
+                (int) $source->transaction_count
             );
         }
 
@@ -864,14 +1236,13 @@ class FinancialInsightService
      */
     private function buildDebtSummary(User $user, array $filters): string
     {
-        $debts = Debt::query()
+        $base = fn (): Builder => Debt::query()
             ->where('user_id', $user->id)
-            ->whereIn('type', $filters['debtSubtypes'])
-            ->get();
+            ->whereIn('type', $filters['debtSubtypes']);
 
         $lines = ['=== UTANG & PIUTANG (DEBT) ==='];
 
-        if ($debts->isEmpty()) {
+        if ($base()->toBase()->count() === 0) {
             $lines[] = 'Tidak ada data utang/piutang yang tercatat untuk user ini.';
 
             return implode("\n", $lines);
@@ -880,83 +1251,75 @@ class FinancialInsightService
         $lines[] = 'Posisi di bawah adalah kondisi TERKINI (bukan rentang periode tertentu).';
 
         foreach ($filters['debtSubtypes'] as $type) {
-            $items = $debts->where('type', $type);
-            if ($items->isEmpty()) {
-                continue;
-            }
+            $ofType = fn (): Builder => $base()->where('type', $type);
 
             $isUtang = $type === Debt::TYPE_UTANG;
             $label = $isUtang ? 'UTANG' : 'PIUTANG';
             $word = $isUtang ? 'lunas' : 'tertagih';
 
-            $active = $items->filter(fn (Debt $debt): bool => $debt->status !== Debt::STATUS_LUNAS);
-            $totalSisa = (float) $active->sum(fn (Debt $debt): float => (float) $debt->amount - (float) $debt->paid_amount);
-            $totalNominal = (float) $active->sum('amount');
-            $overdue = $active->filter(fn (Debt $debt): bool => $debt->isOverdue());
+            // Agregasi lewat SQL; hanya daftar rincian yang limited (LIMIT 10)
+            // yang masih perlu baris — jadi user dengan ratusan catatan utang
+            // tidak memuat semuanya ke memori.
+            $active = $ofType()->where('status', '!=', Debt::STATUS_LUNAS);
 
-            $lines[] = sprintf(
-                '%s AKTIF (belum %s): %d catatan, total sisa Rp %s dari total Rp %s.%s',
-                $label,
-                $word,
-                $active->count(),
-                number_format($totalSisa, 0, ',', '.'),
-                number_format($totalNominal, 0, ',', '.'),
-                $overdue->isNotEmpty() ? sprintf(' %d catatan LEBIH JATUH TEMPO.', $overdue->count()) : ''
-            );
+            $activeTotals = (clone $active)->toBase()
+                ->selectRaw('COUNT(*) as active_count')
+                ->selectRaw('COALESCE(SUM(debts.amount), 0) as total_amount')
+                ->selectRaw('COALESCE(SUM(debts.amount - debts.paid_amount), 0) as total_sisa')
+                ->first();
 
-            foreach ($active->take(10) as $debt) {
-                $detail = sprintf(
-                    '  - %s: sisa Rp %s dari Rp %s (status: %s',
-                    $debt->counterparty_name,
-                    number_format((float) $debt->amount - (float) $debt->paid_amount, 0, ',', '.'),
-                    number_format((float) $debt->amount, 0, ',', '.'),
-                    $debt->statusLabel()
+            $activeCount = (int) $activeTotals->active_count;
+
+            if ($activeCount > 0) {
+                $overdueCount = (clone $active)->toBase()
+                    ->whereNotNull('due_date')
+                    ->where('due_date', '<', today())
+                    ->count();
+
+                $lines[] = sprintf(
+                    '%s AKTIF (belum %s): %d catatan, total sisa Rp %s dari total Rp %s.%s',
+                    $label,
+                    $word,
+                    $activeCount,
+                    number_format((float) $activeTotals->total_sisa, 0, ',', '.'),
+                    number_format((float) $activeTotals->total_amount, 0, ',', '.'),
+                    $overdueCount > 0 ? sprintf(' %d catatan LEBIH JATUH TEMPO.', $overdueCount) : ''
                 );
-                if ($debt->due_date !== null) {
-                    $detail .= ', jatuh tempo '.$debt->due_date->toDateString();
+
+                // Prioritaskan sisa tagihan terbesar — paling relevan buat
+                // pertanyaan "ke siapa saya masih punya utang?".
+                $details = (clone $active)->toBase()
+                    ->orderByRaw('(amount - paid_amount) DESC')
+                    ->limit(self::TOP_N * 2)
+                    ->get();
+
+                foreach ($details as $debt) {
+                    $detail = sprintf(
+                        '  - %s: sisa Rp %s dari Rp %s (status: %s',
+                        $debt->counterparty_name,
+                        number_format((float) $debt->amount - (float) $debt->paid_amount, 0, ',', '.'),
+                        number_format((float) $debt->amount, 0, ',', '.'),
+                        Debt::statusOptions()[$debt->status] ?? (string) $debt->status
+                    );
+                    if ($debt->due_date !== null) {
+                        $detail .= ', jatuh tempo '.$debt->due_date;
+                    }
+                    $lines[] = $detail.');';
                 }
-                $lines[] = $detail.');';
             }
 
-            $lunas = $items->filter(fn (Debt $debt): bool => $debt->status === Debt::STATUS_LUNAS);
-            if ($lunas->isNotEmpty()) {
+            $lunasCount = $ofType()->toBase()->where('status', Debt::STATUS_LUNAS)->count();
+
+            if ($lunasCount > 0) {
                 $lines[] = sprintf(
                     '%s lunas: %d catatan (tidak dihitung sebagai kewajiban/hak aktif).',
                     $label,
-                    $lunas->count()
+                    $lunasCount
                 );
             }
         }
 
         return implode("\n", $lines);
-    }
-
-    /**
-     * Kelompokkan koleksi expense per nama kategori, urut dari total terbesar.
-     * Kategori kosong (parsing gagal / belum diisi) → "Tanpa Kategori".
-     *
-     * @param  Collection<int, Expense>  $expenses
-     * @return Collection<string, Collection<int, Expense>>
-     */
-    private function groupByCategory(Collection $expenses): Collection
-    {
-        return $expenses
-            ->groupBy(fn (Expense $expense): string => $expense->category?->name ?? 'Tanpa Kategori')
-            ->sortByDesc(fn (Collection $items): float => (float) $items->sum('amount'));
-    }
-
-    /**
-     * Kelompokkan koleksi expense per vendor, urut dari total terbesar.
-     * Vendor kosong → "Tanpa Nama Vendor".
-     *
-     * @param  Collection<int, Expense>  $expenses
-     * @return Collection<string, Collection<int, Expense>>
-     */
-    private function groupByVendor(Collection $expenses): Collection
-    {
-        return $expenses
-            ->groupBy(fn (Expense $expense): string => $expense->vendor ?: 'Tanpa Nama Vendor')
-            ->sortByDesc(fn (Collection $items): float => (float) $items->sum('amount'));
     }
 
     /**
@@ -969,17 +1332,19 @@ class FinancialInsightService
      * jawaban tersebut supaya tidak pernah tampil ke user, lalu mencatatnya
      * di log untuk investigasi.
      */
-    private function guardAnswer(string $rawAnswer, User $user, string $question): string
+    private function guardAnswer(string $rawAnswer, User $user, string $question): AiInsightResult
     {
         if (AiAnswerSanitizer::hasPathologicalRepetition($rawAnswer)) {
             Log::warning('Jawaban Tanya AI terdeteksi rusak (pengulangan karakter/kata berlebihan) — jawaban tidak ditampilkan ke user.', [
                 'user_id' => $user->id,
-                'question' => $question,
+                // Pertanyaan user = input bebas yang bisa memuat data sensitif; hanyaExcerpt
+                // singkat yang disimpan (lihat App\Support\LogSanitizer).
+                'question' => LogSanitizer::excerpt($question),
                 'answer_length' => mb_strlen($rawAnswer),
                 'answer_excerpt' => mb_substr($rawAnswer, 0, 120),
             ]);
 
-            return self::INVALID_ANSWER_MESSAGE;
+            return AiInsightResult::invalidAnswer(self::INVALID_ANSWER_MESSAGE);
         }
 
         // Pengaman kedua: AI kadang tetap memakai **bold** walau prompt sudah
@@ -989,7 +1354,9 @@ class FinancialInsightService
 
         // Jawaban yang setelah dibersihkan jadi kosong (mis. isinya hanya "**")
         // sama tidak bergunanya dengan jawaban rusak.
-        return $answer === '' ? self::INVALID_ANSWER_MESSAGE : $answer;
+        return $answer === ''
+            ? AiInsightResult::invalidAnswer(self::INVALID_ANSWER_MESSAGE)
+            : AiInsightResult::answered($answer);
     }
 
     /**
@@ -1024,6 +1391,12 @@ class FinancialInsightService
 
         $header = $this->buildDataHeader($filters);
 
+        // Ringkasan dipotong SESUDAH tahu berapa karakter yang sudah dipakai
+        // system prompt + header + pertanyaan, supaya batasnya benar-benar
+        // berlaku untuk prompt UTUH, bukan cuma untuk ringkasannya saja.
+        $skeletonLength = mb_strlen($system) + mb_strlen($header) + mb_strlen($question) + self::PROMPT_SKELETON_RESERVE;
+        $summary = $this->fitSummaryToBudget($summary, max(self::MIN_SUMMARY_CHARS, self::MAX_PROMPT_CHARS - $skeletonLength));
+
         return <<<PROMPT
 $system
 
@@ -1036,6 +1409,67 @@ $question
 
 Jawaban (teks polos, tanpa markdown):
 PROMPT;
+    }
+
+    /**
+     * Pastikan ringkasan data muat dalam jatah karakter.
+     *
+     * Bentuk pemotongannya disengaja "tidak merusak struktur":
+     *  1. Pemotongan SELALU pada batas baris (tidak pernah memotong di tengah
+     *     satu baris angka), jadi tidak ada baris yang jadi tidak terbaca;
+     *  2. Baris dipotong dari AKHIR, sedangkan baris paling atas justru yang
+     *     paling penting (total keseluruhan, rentang periode, total per
+     *     tahun) — jadi data inti tetap utuh;
+     *  3. Judul seksi yang isinya sudah habis terpotong ikut dibuang, supaya
+     *     AI tidak salah mengira ada rincian yang sengaja disembunyikan;
+     *  4. Selalu ditutup penanda eksplisit agar AI tahu datanya ada yang tidak
+     *     ditampilkan, alih-alih mengarang angka untuk mengisi bagian yang
+     *     hilang.
+     *
+     * Bentuk ringkas yang sudah dibatasi agregasi SQL + LIMIT membuat
+     * pemotongan ini nyaris tidak pernah terjadi; ini jaring pengaman
+     * terakhir untuk kasus ekstrem.
+     */
+    private function fitSummaryToBudget(string $summary, int $budget): string
+    {
+        if (mb_strlen($summary) <= $budget) {
+            return $summary;
+        }
+
+        $notice = self::TRUNCATION_NOTICE;
+        $lines = explode("\n", $summary);
+
+        // (2) Buang baris dari akhir sampai muat, selalu di batas baris.
+        while (count($lines) > 1 && mb_strlen(implode("\n", $lines)) + mb_strlen($notice) + 1 > $budget) {
+            array_pop($lines);
+        }
+
+        // (3) Buang judul seksi menggantung (tanpa isi lagi).
+        while (count($lines) > 1 && $this->isSectionHeading(end($lines))) {
+            array_pop($lines);
+        }
+
+        // (4) Tutup dengan penanda pemotongan.
+        return implode("\n", $lines)."\n".$notice;
+    }
+
+    /**
+     * Apakah baris ini judul seksi (bukan angka/agregat)?
+     *
+     * Pola: judul blok '=== ... ===' atau baris yang diakhiri titik dua tanpa
+     * angka di dalamnya — misalnya 'Kategori terbesar sepanjang riwayat (top
+     * 5):' atau '  2025-03-15: Rp 150.000 (1 transaksi)' yang kedua-tiganya
+     * TIDAK boleh dianggap judul (memakai ": " di tengah + ditutup kurung).
+     */
+    private function isSectionHeading(string $line): bool
+    {
+        $trimmed = trim($line);
+
+        if ($trimmed === '' || preg_match('/\d/', $trimmed) === 1) {
+            return false;
+        }
+
+        return str_starts_with($trimmed, '===') || str_ends_with($trimmed, ':');
     }
 
     /**

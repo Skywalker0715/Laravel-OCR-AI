@@ -2,9 +2,12 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 
@@ -91,6 +94,23 @@ class Category extends Model
         return $this->hasMany(CategoryAppearanceOverride::class);
     }
 
+    /**
+     * Eager-load personalisasi tampilan milik SATU user saja, sehingga
+     * displayIconFor()/displayColorFor() tidak memicu query per kategori
+     * (N+1) saat dipakai pada tabel, grafik, atau PDF.
+     *
+     * Dipakai di halaman yang memanggil display*For() untuk tiap baris:
+     * CategoryResource, tabel Budgets, dan query expense halaman Laporan.
+     *
+     * @param  Builder  $query  query kategori (induk atau nested eager load)
+     */
+    public function scopeWithAppearanceOverridesFor(Builder $query, ?int $userId): Builder
+    {
+        return $query->with([
+            'appearanceOverrides' => fn (Relation $relation): Relation => $relation->where('user_id', $userId),
+        ]);
+    }
+
     /** Ikon yang seharusnya dilihat oleh user tertentu. */
     public function displayIconFor(User $user): ?string
     {
@@ -153,42 +173,69 @@ class Category extends Model
      * Cari kategori berdasarkan nama; buat baru bila belum ada. Urutan: default sistem
      * (user_id NULL) didahulukan agar semua user memakai instance sama, lalu milik user,
      * lalu buat baru (default sistem bila nama terdaftar di DEFAULT_CATEGORIES).
+     *
+     * TAHAN RACE: bila proses/request lain menyisipkan kategori dengan nama+owner
+     * yang sama tepat SETELAH pengecekan di atas (tapi sebelum INSERT di sini),
+     * unique index `categories_user_name_unique` /
+     * `categories_default_name_unique` menolak INSERT tersebut. Pelanggaran unik
+     * itu ditangkap, lalu baris yang sudah ada diambil sebagai hasil — pemanggil
+     * tidak pernah melihat exception dan tetap mendapat SATU baris kategori.
      */
     public static function findOrCreateByName(string $name, ?int $userId): ?self
     {
-        $existing = self::query()
-            ->where('name', $name)
-            ->whereNull('user_id')
-            ->first();
+        $existing = self::findExistingByName($name, $userId);
 
         if ($existing) {
             return $existing;
-        }
-
-        if ($userId !== null) {
-            $userOwned = self::query()
-                ->where('name', $name)
-                ->where('user_id', $userId)
-                ->first();
-
-            if ($userOwned) {
-                return $userOwned;
-            }
         }
 
         $default = collect(self::DEFAULT_CATEGORIES)->first(
             fn (array $item): bool => $item['name'] === $name
         );
 
-        return self::create([
-            'name' => $name,
-            'icon' => $default['icon'] ?? null,
-            'color' => $default['color'] ?? '#64748B',
-            // Kategori terdaftar sebagai default sistem jadi milik bersama
-            // (user_id NULL); kategori baru di luar daftar jadi milik user
-            // yang memicunya agar tidak mencemari daftar user lain.
-            'user_id' => $default ? null : $userId,
-        ]);
+        try {
+            return self::create([
+                'name' => $name,
+                'icon' => $default['icon'] ?? null,
+                'color' => $default['color'] ?? '#64748B',
+                // Kategori terdaftar sebagai default sistem jadi milik bersama
+                // (user_id NULL); kategori baru di luar daftar jadi milik user
+                // yang memicunya agar tidak mencemari daftar user lain.
+                'user_id' => $default ? null : $userId,
+            ]);
+        } catch (UniqueConstraintViolationException) {
+            // Balapan: baris sudah dibuat proses lain sesaat sebelumnya — pakai
+            // baris itu. Bila ternyata baris tersebut sudah terhapus lagi
+            // (kasus langka), kembalikan null seperti kegagalan create biasa.
+            return self::findExistingByName($name, $userId);
+        }
+    }
+
+    /**
+     * Pencarian kategori yang sudah ada: default sistem (user_id NULL) lebih
+     * dulu, lalu milik $userId. Dipakai sebelum INSERT dan lagi setelah
+     * menangkap pelanggaran unique index (jalur balapan) supaya logikanya satu
+     * sumber kebenaran.
+     */
+    private static function findExistingByName(string $name, ?int $userId): ?self
+    {
+        $shared = self::query()
+            ->where('name', $name)
+            ->whereNull('user_id')
+            ->first();
+
+        if ($shared) {
+            return $shared;
+        }
+
+        if ($userId === null) {
+            return null;
+        }
+
+        return self::query()
+            ->where('name', $name)
+            ->where('user_id', $userId)
+            ->first();
     }
 
     /**
@@ -234,9 +281,21 @@ class Category extends Model
     }
 
     /**
-     * Jumlah transaksi milik $userId pada kategori ini — dibedakan dari kolom
-     * "Jumlah Transaksi" di tabel list (yang menghitung lintas user) agar konsisten
-     * dengan Total Pengeluaran pada halaman View.
+     * Jumlah expense milik $userId pada kategori ini.
+     *
+     * CATATAN: angka ini bisa BERBEDA dari kolom "Jumlah Transaksi" di tabel
+     * list, dan itu memang disengaja:
+     *  - Kolom tabel memakai `->counts('expenses')`. Relasi `expenses()` mewarisi
+     *    global scope `OwnedByUserScope` milik model Expense, jadi saat ada
+     *    sesi login angka tabel pun ter-scope ke user yang sedang login.
+     *  - Method ini menambah filter `where('user_id', $userId)` eksplisit di
+     *    atas scope tersebut, sehingga hasilnya sama di konteks yang TIDAK
+     *    punya sesi login (console/queue) dan tidak pernah ikut berubah bila
+     *    pemanggil kebetulan memakai id user lain.
+     *
+     * Kedua angka tetap sama untuk user yang sedang login saat dipakai di
+     * View; perbedaan baru muncul bila dipanggil dari konteks tanpa auth.
+     * $userId null = 0 (tidak ada user yang bisa memiliki expense).
      */
     public function expenseCountForUser(?int $userId): int
     {

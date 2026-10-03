@@ -74,6 +74,24 @@ flowchart TD
 6. **PENTING:** jangan pernah share/commit file `.env` ke manapun (sudah otomatis di-gitignore oleh project ini) — API key itu bersifat rahasia seperti password.
 7. **Tetap tangguh tanpa AI.** Aplikasi ini dirancang dengan fallback parser bawaan — jika Cohere API tidak tersedia (belum setup API key, sedang down, atau limit trial habis), sistem OTOMATIS beralih ke parser cerdas berbasis pola tanpa kehilangan fungsi utama. Ingin pakai tanpa AI sama sekali? Cukup biarkan `COHERE_API_KEY` kosong di `.env` — aplikasi tetap berjalan penuh.
 
+> ### 🔑 API key TIDAK disertakan dalam source code ini
+>
+> Repo ini sengaja **tidak menyertakan API key Cohere siapa pun** — `COHERE_API_KEY`
+> di `.env.example` dibiarkan kosong. Key harus dibuat sendiri oleh pembeli di akun
+> Cohere miliknya sendiri, mengikuti langkah di atas.
+>
+> **Mengapa?** (1) Key yang ikut tersebar di source code bisa dipakai orang lain dan
+> kuota/tagihan Anda malah habis; (2) repository publik bisa di-fork atau di-index
+> mesin pencari, sehingga key yang pernah ter-commit hampir mustahil dianggap aman;
+> (3) tiap pembeli berhak punya akun & tagihan sendiri agar biayanya mudah dilacak.
+>
+> Jangan sampai tergoda memakai key milik orang lain yang kebetulan "sudah
+> terpasang" di repo lain: begitu key dipakai bersama, kuota 1.000 trial habis dalam
+> hitungan jam dan aplikasi terlihat rusak — padahal masalahnya bukan di kodenya.
+>
+> Tanpa key, parsing struk tetap berjalan memakai fallback regex. Yang benar-benar
+> butuh key hanya fitur **Tanya AI**.
+
 ## 📦 Instalasi
 
 1. Clone repo lalu install dependency:
@@ -115,9 +133,89 @@ flowchart TD
    php artisan storage:link
    ```
 
+5. **WAJIB — pastikan queue worker berjalan setelah deploy.** Upload struk
+   diproses lewat job queue (`AIParserJob`), bukan langsung saat request. Kalau
+   worker tidak berjalan, struk tetap tersimpan tapi vendor/total/item **tidak
+   pernah terisi** selamanya:
+   ```bash
+   php artisan queue:work --timeout=150
+   ```
+   Jalankan di terminal terpisah, atau daftarkan ke **Supervisor** /
+   **systemd** / **Task Scheduler** agar otomatis hidup lagi setelah server
+   restart. Aturan lengkap soal `--timeout` dan `retry_after` ada di bagian
+   ["Aturan Timeout Queue"](#aturan-timeout-queue-wajib-dipahami-sebelum-deploy).
+
+   Di `production`, pastikan juga `APP_DEBUG=false` agar detail error tidak
+   bocor ke pengunjung.
+
+## ✅ Checklist Deploy Production
+
+Checklist singkat untuk sebelum aplikasi dipakai pengguna sungguhan. File
+`.env.example` juga sudah memuat komentar singkat untuk hal yang sama.
+
+**Environment**
+- [ ] `APP_ENV=production`
+- [ ] `APP_DEBUG=false` — **wajib**. Halaman debug menampilkan stack trace dan
+      isi `.env` ke siapa pun yang membuka URL tersebut.
+- [ ] `APP_URL` sesuai domain asli (dipakai untuk link notifikasi & URL absolut).
+- [ ] `LOG_LEVEL=info` — **jangan** `debug` di production. Isi struk, respons AI,
+      dan pertanyaan user hanya ditulis pada level `debug`, jadi `info` memastikan
+      data keuangan pengguna tidak tersalin ke `storage/logs/laravel.log`.
+- [ ] `SESSION_ENCRYPT=true` (sudah jadi default di `.env.example`).
+- [ ] `SESSION_SECURE_COOKIE=true` **hanya jika** situs diakses lewat HTTPS
+      (atau di belakang reverse proxy yang mengakhiri TLS). Mengaktifkannya saat
+      situs masih `http://` membuat login tidak pernah berhasil tersimpan.
+- [ ] `DB_*` terisi kredensial database production (jangan pakai akun `root`).
+- [ ] `COHERE_API_KEY` diisi dengan **API key milik Anda sendiri** — repo ini
+      sengaja tidak menyertakan key apa pun. Kosongkan saja bila tidak memakai AI.
+
+**Kode & aset**
+- [ ] `composer install --no-dev --optimize-autoloader` (produksi tidak butuh dev).
+- [ ] `npm install && npm run build` — **`npm run build`, bukan `npm run dev`**.
+      Tanpa build, asset Filament tidak tersedia dan halaman tampil tanpa CSS.
+- [ ] `php artisan migrate --force`
+- [ ] `php artisan storage:link` (untuk asset publik).
+- [ ] Web server diarahkan ke folder `public/`, **jangan** ke root project.
+
+**Layanan latar belakang**
+- [ ] Queue worker berjalan **dengan `--timeout=150`** (Supervisor / systemd /
+      Task Scheduler supaya otomatis hidup lagi setelah server restart).
+      Tanpa worker, upload struk tersimpan tapi vendor/total/item tidak pernah terisi.
+- [ ] `php artisan queue:restart` dijalankan setiap kali deploy — worker yang
+      masih berjalan memuat kode versi lama di memori.
+- [ ] Login queue worker memakai akun non-root untuk keamanan proses.
+
+**Verifikasi setelah deploy**
+- [ ] `php artisan test` lulus di environment pengujian.
+- [ ] Upload satu struk sungguhan, lalu pastikan: foto terunggah, notifikasi
+      parsing masuk, dan vendor/total/item terisi.
+- [ ] Buka `/admin` dalam jendela incognito — pastikan tidak ada halaman debug
+      atau error yang membocorkan path server.
+
 ## ▶️ Menjalankan Aplikasi
 
 > **PENTING - queue worker wajib berjalan.** Parsing OCR + AI dijalankan async lewat `AIParserJob`. Tanpa worker, hasil parsing tidak akan pernah terisi.
+
+### Aturan Timeout Queue (WAJIB dipahami sebelum deploy)
+
+> Worker juga wajib dijalankan dengan `--timeout=150`. Nilai bawaan Laravel hanya **60 detik**, sedangkan `AIParserJob::$timeout = 150` — tanpa `--timeout=150`, worker akan **membunuh job di detik ke-60** padahal job itu masih berjalan (OCR Tesseract + request Cohere). Job yang dibunuh tidak pernah selesai, pengguna tidak mendapat notifikasi hasilnya, dan data struknya menggantung.
+
+Tiga angka ini harus berurutan. Melanggar urutan menyebabkan job dieksekusi dua kali — bug yang sulit dideteksi karena hasil parsing-nya "terlihat benar"; hanya notifikasi yang dobel, item yang saling hapus, dan API yang terpanggil dua kali:
+
+```
+$timeout job (150)  <=  --timeout worker (150)  <  retry_after (180)
+  AIParserJob::$timeout       queue:work          config/queue.php
+```
+
+| Nilai | Ditemukan di | Arti |
+|-------|--------------|------|
+| **150** | `app/Jobs/AIParserJob.php` (`$timeout`) | Batas waktu satu job. Melewatinya -> job dianggap gagal lalu di-retry. |
+| **150** | argumen `--timeout` pada `queue:work` | Batas waktu proses child worker. **HARUS >= timeout job.** Kalau lebih kecil, worker mematikan job duluan. |
+| **180** | `config/queue.php` (`retry_after`) | Berapa lama Laravel menunggu sebelum menganggap job hilang lalu **mengambilnya lagi**. **HARUS > timeout job.** |
+
+Mengapa `retry_after` harus lebih besar: saat job masih berjalan di worker pertama, Laravel hanya melihat baris `reserved_at` di tabel `jobs`. Kalau `retry_after` habis duluan, Laravel menganggap job itu mati dan worker kedua mengambil job yang sama -> **eksekusi ganda**: parsing struk jalan dua kali, pengguna menerima dua notifikasi, `expense_items` saling delete-create antar dua proses, dan Cohere API terpanggil dua kali (biaya dobel).
+
+Nilai bawaan di `config/queue.php` sudah 180, jadi tidak perlu menyetel apa pun lagi di `.env`. Yang wajib diperhatikan justru argumen `--timeout=150` saat menjalankan worker — sudah terpasang otomatis di `composer run dev`.
 
 ### Cara Utama (Direkomendasikan): Satu Perintah
 
@@ -126,7 +224,7 @@ flowchart TD
 | Slot | Proses | Fungsi |
 |------|--------|--------|
 | `server` | `php artisan serve` | HTTP server di `http://127.0.0.1:8000` |
-| `queue` | `php artisan queue:work --tries=1` | Worker antrian **WAJIB** (memproses OCR/AI parsing) |
+| `queue` | `php artisan queue:work --tries=1 --timeout=150` | Worker antrian **WAJIB** (memproses OCR/AI parsing) |
 | `logs` | `php artisan dev:logs` | Log viewer real-time (meneruskan ke `php artisan pail`) |
 | `vite` | `npm run dev` | Asset build hot-reload di `http://localhost:5173` |
 
@@ -155,7 +253,7 @@ Gunakan cara ini bila `composer run dev` gagal di environment tertentu — misal
 
 ```bash
 php artisan serve           # terminal 1
-php artisan queue:work      # terminal 2 - WAJIB, jangan sampai lupa!
+php artisan queue:work --timeout=150   # terminal 2 - WAJIB, jangan sampai lupa!
 npm run dev                 # terminal 3 (opsional, hanya untuk hot-reload asset saat development)
 ```
 
@@ -197,7 +295,13 @@ Test suite (Pest) mencakup scoping multi-user, parsing fallback, budget & notifi
 
 - **Authorization via global scope, bukan Policy.** Aplikasi ini tidak memakai Laravel Policy - isolasi data per-user sepenuhnya lewat global scope `OwnedByUserScope` (model Expense, Income, Debt & Budget) ditambah override query di resource Category. Kalau menambah endpoint/route baru **di luar Filament**, tambahkan authorization check manual.
 - **Registrasi terbuka secara default.** Siapa pun bisa mendaftar lewat halaman registrasi panel. Cara menonaktifkan: hapus/comment baris `->registration(Register::class)` di `app/Providers/Filament/AdminPanelProvider.php`.
-- **`OwnedByUserScope` tidak aktif untuk request tanpa auth** (by design, agar queue/console bisa memproses data). Kalau menambah route **publik** yang mem-query model `Expense`/`Income`/`Debt`/`Budget`/`Category`, WAJIB tambahkan filter `user_id` manual.
+- **Model data single-tier — semua user adalah pemilik data sendiri, tanpa role.** Aplikasi ini sengaja TIDAK punya konsep role/permission (tidak ada admin vs user, tidak ada tabel `roles`). Setiap akun yang terdaftar otomatis menjadi panel admin Filament **untuk data miliknya sendiri**, dan tidak dapat melihat data akun lain. Konsekuensinya:
+  - Isolasi data dijamin oleh **global scope**, bukan oleh Policy — semua user setara secara hak akses.
+  - **Jangan** menambahkan fitur "role admin" tanpa juga menambah tabel role, policy, dan UI pengelolaannya. Itu bukan perubahan kecil: seluruh asumsi di codebase ini adalah *setiap user memiliki datanya sendiri*.
+  - Jika butuh pembatasan (mis. hanya 1 user untuk penggunaan personal), lakukan di level **registrasi** (matikan `->registration(Register::class)`), bukan lewat role.
+- **Kategori tidak punya global scope.** `Category` sengaja dibiarkan tanpa `OwnedByUserScope` (alasannya di `tests/Feature/CategoryUiIsolationTest.php`) sehingga **setiap query kategori wajib menambahkan filter sendiri**: `whereNull('user_id')->orWhere('user_id', Auth::id())`. `Category::find()` polos akan mengembalikan kategori milik user lain — jangan dipakai di halaman mana pun.
+- **`OwnedByUserScope` tidak aktif untuk request tanpa auth** (by design, agar queue/console bisa memproses data). Konsekuensinya, setiap query di **console/queue wajib memakai `where('user_id', …)` eksplisit** — tanpa itu, satu command bisa membaca atau mengubah data semua user. Kalau menambah command baru, tulis filter eksplisit walaupun kelihatannya redundan.
+- **Isi log tidak boleh memuat data pengguna.** Teks OCR struk, respons mentah AI, dan pertanyaan "Tanya AI" hanya ditulis pada level `debug` dan sudah dipotong 200 karakter (`App\Support\LogSanitizer`). Pastikan `LOG_LEVEL=info` di production.
 - **Set `APP_DEBUG=false` di environment production.** Halaman debug dapat membocorkan stack trace dan isi `.env`.
 - **Foto struk disimpan di disk privat** (`receipts` - `storage/app/private/receipts`), BUKAN lagi di `public/storage`. Penyajian hanya lewat route `/receipt-image/{expense}` dengan authorization check (hanya pemilik expense; user lain dan tamu tidak mendapat akses).
 - Kredensial apa pun hanya boleh ada di `.env` (tidak pernah di-commit); `.env.example` disediakan bersih sebagai template.
@@ -214,9 +318,12 @@ bersamaan, berikut langkah-langkah yang bisa dilakukan:
    ```env
    QUEUE_CONNECTION=redis
    ```
-   lalu jalankan beberapa worker paralel — `php artisan queue:work --queue=default`
+   lalu jalankan beberapa worker paralel — `php artisan queue:work --queue=default --timeout=150`
    bisa dijalankan berkali-kali di proses/terminal terpisah, atau gunakan
    **Supervisor** / **Laravel Horizon** untuk mengelola banyak worker secara otomatis.
+   Saat pindah ke Redis, pastikan `REDIS_QUEUE_RETRY_AFTER` tetap **lebih besar**
+   dari 150 (bawaannya sudah 180) — worker Redis memakai "visibility timeout",
+   jadi job yang melewati batas itu akan dieksekusi ganda oleh worker lain.
 
 2. **Wajar jika widget "Antrian parsing terhambat" muncul.** Satu job parsing
    OCR+AI butuh **15-45 detik** (tergantung respons API Cohere). Widget di

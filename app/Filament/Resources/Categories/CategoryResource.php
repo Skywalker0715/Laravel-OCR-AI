@@ -8,6 +8,7 @@ use App\Filament\Resources\Categories\Pages\ListCategories;
 use App\Filament\Resources\Categories\Pages\ViewCategory;
 use App\Models\Budget;
 use App\Models\Category;
+use App\Support\ColorHex;
 use App\Support\MoneyFormatter;
 use BackedEnum;
 use Filament\Actions\BulkActionGroup;
@@ -147,8 +148,15 @@ class CategoryResource extends Resource
                             ->placeholder('Pilih ikon')
                             ->columnSpan(1),
 
+                        // `->hex()` memastikan state form berupa string "#RRGGBB" (bukan array
+                        // rgba bawaan ColorPicker), dan regex ini menolak nilai
+                        // di luar format hex SEBELUM disimpan ke kolom varchar(20)
+                        // yang tidak punya constraint isi. Nilai yang lolos form
+                        // tetap disanitasi sekali lagi di laporan-pdf.blade.php.
                         ColorPicker::make('color')
                             ->label('Warna')
+                            ->hex()
+                            ->regex(ColorHex::PATTERN)
                             ->columnSpan(1),
                     ]),
             ]);
@@ -350,6 +358,11 @@ class CategoryResource extends Resource
      * Batasi kategori yang tampil: kategori default sistem (user_id NULL)
      * serta kategori milik user yang sedang login. Kategori milik user lain
      * tidak akan pernah muncul di daftar.
+     *
+     * appearanceOverrides ikut di-eager-load (terfilter ke user login) karena
+     * kolom Ikon/Warna/Kode Hex memanggil displayIconFor()/displayColorFor()
+     * untuk SETIAP baris — tanpa eager-load itu tiap baris memicu satu query
+     * (N+1) ke tabel category_appearance_overrides.
      */
     public static function getEloquentQuery(): Builder
     {
@@ -360,7 +373,8 @@ class CategoryResource extends Resource
                 if (Auth::check()) {
                     $query->orWhere('user_id', Auth::id());
                 }
-            });
+            })
+            ->withAppearanceOverridesFor(Auth::id());
     }
 
     /**

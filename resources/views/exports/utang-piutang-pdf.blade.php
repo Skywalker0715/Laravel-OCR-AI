@@ -47,7 +47,7 @@
                 <div class="meta">
                     Pemilik: {{ $userName }}
                     &middot; Dibuat: {{ $generatedAt }}
-                    &middot; Total Catatan: {{ $debts->count() }}
+                    &middot; Total Catatan: {{ number_format($totalRowCount, 0, ',', '.') }}
                 </div>
             </td>
         </tr>
@@ -78,7 +78,20 @@
         </tr>
     </table>
 
-    <h3 class="section-title">Daftar Catatan Utang Piutang ({{ $debts->count() }})</h3>
+    <h3 class="section-title">Daftar Catatan Utang Piutang ({{ number_format($totalRowCount, 0, ',', '.') }})</h3>
+    {{-- Baris detail dibatasi agar PDF tetap ringan. Kartu ringkasan di atas
+         TETAP dihitung dari seluruh data hasil filter (SQL SUM), bukan dari
+         baris yang tercetak. Catatan berikut memberi tahu pembaca kalau
+         daftarnya dipotong dan ke mana daftar lengkap bisa diperoleh. --}}
+    @if ($isTruncated)
+        <div style="margin-bottom: 8px; padding: 7px 9px; background-color: #FEF3C7; border: 1px solid #F59E0B; font-size: 9px; color: #92400E;">
+            <strong>Catatan:</strong> daftar di bawah hanya menampilkan {{ number_format($debts->count(), 0, ',', '.') }} dari {{ number_format($totalRowCount, 0, ',', '.') }} catatan
+            (batas {{ number_format($detailLimit, 0, ',', '.') }} baris agar file PDF tidak terlalu besar).
+            Kartu <strong>Total Utang</strong> &amp; <strong>Total Piutang Belum Lunas</strong> di atas
+            <strong>tetap dihitung dari seluruh {{ number_format($totalRowCount, 0, ',', '.') }} catatan</strong>, bukan hanya yang ditampilkan.
+            Untuk daftar lengkap, gunakan <strong>Export Excel</strong> yang tidak membatasi jumlah baris.
+        </div>
+    @endif
     <table class="data">
         <thead>
             <tr>

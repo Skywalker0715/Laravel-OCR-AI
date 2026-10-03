@@ -145,7 +145,12 @@
         <tbody>
             @forelse ($categoryBreakdown as $row)
                 <tr>
-                    <td><span class="dot" style="background-color: {{ $row['color'] }};"></span>{{ $row['name'] }}</td>
+                    {{-- Warna kategori disanitasi tepat sebelum masuk CSS: kolom color hanya
+             varchar(20) (tanpa constraint isi), dan override per user di pathway
+             yang sama. Nilai di luar format hex diganti warna netral supaya satu
+             baris rusak tidak membuat dompdf gagal render. Pola yang sama juga
+             dipakai sebagai validasi form — lihat App\Support\ColorHex. --}}
+                    <td><span class="dot" style="background-color: {{ \App\Support\ColorHex::safe($row['color']) }};"></span>{{ $row['name'] }}</td>
                     <td>{{ $row['count'] }}</td>
                     <td>
                         @if ($summary['total'] > 0)
@@ -167,6 +172,20 @@
 
     {{-- DETAIL TRANSAKSI --}}
     <h3 class="section-title">Detail Transaksi ({{ $summary['count'] }})</h3>
+    {{-- Baris detail dibatasi agar PDF tetap ringan. Ringkasan & breakdown
+         kategori DI ATAS tetap dihitung dari seluruh data hasil filter,
+         bukan dari baris yang tercetak — supaya angka totalnya tetap jujur.
+         Catatan di bawah memberi tahu pembaca kalau daftar barisnya dipotong,
+         dan ke mana daftar lengkap bisa diperoleh (export Excel tidak dibatasi). --}}
+    @if ($isTruncated)
+        <div style="margin-bottom: 8px; padding: 7px 9px; background-color: #FEF3C7; border: 1px solid #F59E0B; font-size: 10px; color: #92400E;">
+            <strong>Catatan:</strong> tabel detail hanya menampilkan {{ $expenses->count() }} dari {{ number_format($totalRowCount, 0, ',', '.') }} transaksi pada periode ini
+            (batas {{ number_format($detailLimit, 0, ',', '.') }} baris agar file PDF tidak terlalu besar).
+            Total, jumlah transaksi, rata-rata, dan breakdown kategori di halaman ini
+            <strong>tetap dihitung dari seluruh {{ number_format($totalRowCount, 0, ',', '.') }} transaksi</strong>, bukan hanya yang ditampilkan.
+            Untuk daftar lengkap, gunakan <strong>Export Excel</strong> yang tidak membatasi jumlah baris.
+        </div>
+    @endif
     <table class="data">
         <thead>
             <tr>

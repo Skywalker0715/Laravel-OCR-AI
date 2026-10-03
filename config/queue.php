@@ -39,7 +39,25 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // retry_after = berapa detik Laravel menunggu sebelum menganggap
+            // job "hilang" dan membawanya kembali ke antrean.
+            //
+            // ATURAN WAJIB: retry_after HARUS lebih besar dari $timeout job
+            // terpanjang (App\Jobs\AIParserJob::$timeout = 150 detik). Kalau
+            // kebalikan, job yang masih berjalan di worker pertama dianggap
+            // mati, lalu DIAMBIL worker kedua dan dieksekusi ganda: parsing
+            // struk jalan dua kali, pengguna menerima notifikasi kembar, dan
+            // tabel expense_items saling delete-create antar dua proses.
+            //
+            // 180 dipilih karena memberi jarak 30 detik di atas timeout job
+            // (150) — jarak ini penting, bukan sekadar angka bulat: OCR Tesseract
+            // + request Cohere + penyimpanan DB bisa menyentuh batas timeout,
+            // dan retry_after yang hanya sedikit di atasnya akan memicu eksekusi
+            // ganda persis di detik-detik paling menegangkan.
+            //
+            // Worker juga WAJIB dijalankan dengan `--timeout` yang >= timeout
+            // job (lihat README bagian "Menjalankan Aplikasi").
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 180),
             'after_commit' => false,
         ],
 
@@ -47,7 +65,10 @@ return [
             'driver' => 'beanstalkd',
             'host' => env('BEANSTALKD_QUEUE_HOST', 'localhost'),
             'queue' => env('BEANSTALKD_QUEUE', 'default'),
-            'retry_after' => (int) env('BEANSTALKD_QUEUE_RETRY_AFTER', 90),
+            // Nilai yang sama dengan koneksi 'database' di atas: aturan
+            // retry_after > $timeout job berlaku untuk driver apa pun yang
+            // menyatan job lewat database, bukan hanya koneksi database.
+            'retry_after' => (int) env('BEANSTALKD_QUEUE_RETRY_AFTER', 180),
             'block_for' => 0,
             'after_commit' => false,
         ],
@@ -67,7 +88,11 @@ return [
             'driver' => 'redis',
             'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
             'queue' => env('REDIS_QUEUE', 'default'),
-            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 90),
+            // Sama seperti koneksi database: retry_after > $timeout job.
+            // Penting khusus untuk Redis karena worker Redis menandai job
+            // dengan "visibility timeout" — job yang masih diproses tapi sudah
+            // melewati retry_after akan kembali ke antrean dan dieksekusi ganda.
+            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 180),
             'block_for' => null,
             'after_commit' => false,
         ],

@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Expenses\Pages;
 
 use App\Filament\Resources\Expenses\ExpenseResource;
+use App\Jobs\AIParserJob;
 use App\Services\ImageCompressor;
 use App\Services\OCRService;
 use Filament\Notifications\Notification;
@@ -35,6 +36,21 @@ class CreateExpense extends CreateRecord
         return $data;
     }
 
+    /**
+     * Jalankan OCR + dispatch AIParserJob setelah expense tersimpan.
+     *
+     * PENTING: hook ini dipanggil SETELAH record benar-benar tersimpan di
+     * database (CreateRecord::create()). Semua kegagalan di sini — Tesseract
+     * tidak terpasang, file rusak, Cohere down, timeout — TIDAK berarti data
+     * hilang, dan TIDAK boleh dilempar balik ke user: sebelumnya `throw $th`
+     * membuat Filament menampilkan halaman error 500 padahal expense-nya sudah
+     * aman di database, dan user cenderung mengulang create → data duplikat.
+     *
+     * Strategi sekarang: catat detail teknisnya di log server (untuk admin
+     * menelusuri masalah) lalu beri notifikasi ramah yang menjelaskan kondisinya
+     * — expense tetap tersimpan, hanya isi otomatisnya yang belum ada. Detail
+     * teknis (exception message & trace) TIDAK PERNAH ditampilkan ke user.
+     */
     protected function afterCreate(): void
     {
         try {
@@ -58,24 +74,30 @@ class CreateExpense extends CreateRecord
                 $record->save();
 
                 // Dispatch the job to parse the note using AI
-                dispatch(new \App\Jobs\AIParserJob(record: $record));
-
+                dispatch(new AIParserJob(record: $record));
             }
 
         } catch (\Throwable $th) {
+            // Log server: hanya untuk admin, tidak pernah tampil di UI. Sengaja TIDAK
+            // memakai getTraceAsString() (TASK 7): stack trace aplikasi sendiri tidak
+            // menambah nilai diagnosa — penyebab kegagalan ini selalu berasal
+            // dari Tesseract / Cohere / Storage, bukan dari logika internal —
+            // sementara argumen fungsi pada frame yang lebih dalam bisa memuat
+            // path server. Pesan exception + id expense sudah cukup untuk
+            // menemukan akar masalah.
             Log::error('Gagal memproses OCR/AI pada pembuatan expense', [
                 'expense_id' => $this->record->id ?? null,
                 'error' => $th->getMessage(),
-                'trace' => $th->getTraceAsString(),
             ]);
 
+            // Notifikasi ramah: user hanya diberi tahu dampaknya (data manual yang
+            // perlu diisi), tanpa jargon teknis. Expense SUDAH tersimpan.
             Notification::make()
-                ->title('Gagal memproses gambar')
-                ->body('Terjadi kesalahan saat memproses OCR/AI. Silakan coba lagi.')
+                ->title('Belanja tersimpan, tetapi struk belum terbaca')
+                ->body('Foto struk tidak berhasil diproses otomatis. Data belanja Anda sudah tersimpan — silakan isi vendor, total, dan daftar item secara manual.')
                 ->danger()
+                ->persistent()
                 ->send();
-
-            throw $th;
         }
     }
 }

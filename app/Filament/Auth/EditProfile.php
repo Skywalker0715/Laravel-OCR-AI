@@ -25,7 +25,8 @@ use Illuminate\Validation\ValidationException;
 /**
  * Halaman Profile kustom: memperluas halaman bawaan Filament v4 dengan
  * aksi destruktif "Hapus Akun" — user bisa menghapus permanen akunnya
- * beserta seluruh datanya (expenses, budget, kategori pribadi, notifikasi).
+ * beserta seluruh datanya (expenses, budget, kategori pribadi, pemasukan,
+ * utang piutang, notifikasi).
  *
  * Konfirmasi 2 langkah wajib: user harus mengetik ulang email DAN password
  * mereka sebelum penghapusan dieksekusi; ada pemeriksaan ulang (identik)
@@ -130,7 +131,7 @@ class EditProfile extends BaseEditProfile
     {
         return [
             Section::make('Tindakan ini tidak dapat dibatalkan')
-                ->description('Semua data (expenses, budget, kategori pribadi, notifikasi) akan dihapus PERMANEN dan tidak bisa dikembalikan.')
+                ->description('Semua data (expenses, budget, kategori pribadi, pemasukan, utang piutang, notifikasi) akan dihapus PERMANEN dan tidak bisa dikembalikan.')
                 ->schema([
                     Placeholder::make('warningDetail')
                         ->content(new HtmlString(
@@ -138,6 +139,8 @@ class EditProfile extends BaseEditProfile
                             .'Yang akan dihapus dari akun Anda:<br>'
                             .'• Seluruh <strong>expense</strong> beserta itemnya &amp; foto struk fisik<br>'
                             .'• Seluruh <strong>budget</strong> (anggaran)<br>'
+                            .'• Seluruh <strong>pemasukan</strong> (income)<br>'
+                            .'• Seluruh <strong>utang piutang</strong> (utang &amp; piutang)<br>'
                             .'• Seluruh <strong>kategori pribadi</strong> — kategori default sistem tetap utuh<br>'
                             .'• Seluruh <strong>notifikasi</strong><br>'
                             .'• Record <strong>akun</strong> itu sendiri — Anda akan otomatis keluar (logout)'

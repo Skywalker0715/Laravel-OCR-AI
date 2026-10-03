@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Services\Parsing\RegexItemParser;
 use App\Services\Parsing\TotalReconciler;
 use App\Services\Parsing\VendorDetector;
+use App\Support\LogSanitizer;
 use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
@@ -50,7 +51,11 @@ class AIParserService
     {
         $this->usedFallback = false;
 
-        Log::info('Raw OCR text for parsing: '.$text);
+        // Teks OCR = data pribadi user (nama toko, alamat, nomor telp, nominal).
+        // HanyaExcerpt singkat di level DEBUG: default production LOG_LEVEL=info
+        // jadi isi struk tidak pernah tertulis ke log; developer lokal yang
+        // menelusuri masalah parsing bisa mengaktifkan LOG_LEVEL=debug.
+        Log::debug('Teks OCR (excerpt) untuk parsing: '.LogSanitizer::excerpt($text));
 
         $apiKey = config('services.cohere.api_key');
 
@@ -169,7 +174,10 @@ PROMPT;
             ]);
 
         if (! $response->successful()) {
-            Log::error('Cohere API request gagal (model='.$model.', status='.$response->status().'): '.$response->body());
+            // Body error Cohere dipotong: pesan resmi API tetap utuh di depan,
+            // sisanya cukup excerpt untuk diagnosis (isi penuh bisa memuat
+            // sebagian isi struk yang ikut terkirim sebagai prompt).
+            Log::error('Cohere API request gagal (model='.$model.', status='.$response->status().'): '.LogSanitizer::excerpt($response->body()));
         } else {
             // FIX ROOT CAUSE: endpoint yang dipanggil adalah v1 (/v1/chat) yang
             // meletakkan hasil di key top-level "text". Kode lama membaca
@@ -179,16 +187,19 @@ PROMPT;
             // pengaman jika suatu saat aplikasi dipindah ke v2/chat.
             $raw = $response->json('text') ?? $response->json('message.content.0.text') ?? '';
 
-            // Bukti diagnosis: kalau $raw masih kosong, log FULL response body
+            // Bukti diagnosis: kalau $raw masih kosong, log response body
             // (bukan hanya hasil ekstraksi) supaya kegagalan di masa depan bisa
             // dianalisis tanpa menebak-nebak format aktual dari Cohere.
+            // Body tetap dipotong — isinya bisa memuat isi struk yang ikut
+            // terkirim sebagai prompt, jadi tidak boleh ditulis utuh.
             if ($raw === '') {
                 Log::warning(
-                    'Cohere raw body kosong setelah ekstraksi pesan - full body dilampirkan untuk diagnosis',
-                    ['body' => $response->body()]
+                    'Cohere raw body kosong setelah ekstraksi pesan - body dilampirkan (excerpt) untuk diagnosis',
+                    ['body' => LogSanitizer::excerpt($response->body())]
                 );
             }
-            Log::info('Raw AI response (model='.$model.', status='.$response->status().'): '.$raw);
+            // Respons mentah AI = transkripsi ulang isi struk milik user -> debug + excerpt.
+            Log::debug('Respons AI mentah (excerpt, model='.$model.', status='.$response->status().'): '.LogSanitizer::excerpt($raw));
 
             $onlyJson = $this->helper->cleanCohereResponse($raw);
 
@@ -316,7 +327,8 @@ PROMPT;
             'category' => Category::inferCategoryName($vendor.'. '.$itemNames),
         ];
 
-        Log::info('Fallback parsed data: '.json_encode($result));
+        // Isi hasil parsing memuat vendor/total/item milik user -> debug + excerpt.
+        Log::debug('Data hasil parsing fallback (excerpt): '.LogSanitizer::jsonExcerpt($result));
 
         return $result;
     }

@@ -3,12 +3,28 @@
 namespace App\Filament\Widgets;
 
 use App\Models\Expense;
+use App\Support\MonthExpression;
 use Filament\Widgets\ChartWidget;
-use Illuminate\Support\Carbon;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 
 /**
- * Grafik garis pengeluaran per tanggal belanja (date_shopping), seluruh riwayat.
- * Analisis ber-filter tersedia di halaman Laporan.
+ * Grafik garis pengeluaran per BULAN, mencakup seluruh riwayat.
+ *
+ * Kenapa diubah dari per tanggal menjadi per bulan:
+ *  - Versi lama memakai GROUP BY DATE(date_shopping) atas SELURUH riwayat.
+ *    Pada akun yang sudah lama dipakai, ini menghasilkan ribuan titik data,
+ *    dan line chart dengan ribuan titik juga lambat digambar di browser user.
+ *  - Rollup per bulan membuat jumlah titik sama dengan jumlah bulan yang punya
+ *    transaksi — kecil dan stabil berapa pun jumlah datanya. Total per bulan
+ *    tetap persis sama dengan penjumlahan versi per tanggal, jadi tidak ada
+ *    angka yang hilang; hanya pengelompokannya yang lebih kasar.
+ *  - Label sumbu memakai nama bulan ("Juli 2026") lewat MonthExpression, sama
+ *    persis dengan baris breakdown di halaman Kas Arus, dan rollup-nya memakai
+ *    ekspresi tanggal yang sama juga — satu sumber kebenaran untuk "bulan ini".
+ *
+ * Analisis ber-filter per kategori / per periode tetap tersedia di halaman
+ * Laporan dan Kas Arus; widget ini sengaja tetap menampilkan seluruh riwayat.
  */
 class ExpenseLineChart extends ChartWidget
 {
@@ -19,7 +35,8 @@ class ExpenseLineChart extends ChartWidget
      */
     protected int | string | array $columnSpan = ['default' => 1, 'lg' => 3];
 
-    protected ?string $heading = 'Riwayat Pengeluaran';
+    /** Heading menyebut perlubannya supaya granularity grafik jelas bagi pembaca. */
+    protected ?string $heading = 'Riwayat Pengeluaran per Bulan';
 
     protected function getType(): string
     {
@@ -28,21 +45,14 @@ class ExpenseLineChart extends ChartWidget
 
     protected function getData(): array
     {
-        // Kelompokkan per tanggal belanja (date_shopping), bukan created_at,
-        // dan tanpa filter tanggal apa pun supaya seluruh riwayat tampil.
-        $rows = Expense::query()
-            ->whereNotNull('date_shopping')
-            ->selectRaw('DATE(date_shopping) AS day, COALESCE(SUM(amount), 0) AS total')
-            ->groupByRaw('DATE(date_shopping)')
-            ->orderByRaw('DATE(date_shopping)')
-            ->get();
+        $rows = $this->monthlyTotals();
 
         $labels = [];
         $values = [];
 
-        foreach ($rows as $row) {
-            $labels[] = Carbon::parse($row->day)->translatedFormat('d M Y');
-            $values[] = (float) $row->total;
+        foreach ($rows as $monthKey => $total) {
+            $labels[] = MonthExpression::monthLabel((string) $monthKey);
+            $values[] = (float) $total;
         }
 
         return [
@@ -58,5 +68,66 @@ class ExpenseLineChart extends ChartWidget
             ],
             'labels' => $labels,
         ];
+    }
+
+    /**
+     * Total pengeluaran per bulan sebagai map 'Y-m' => total, urut menaik.
+     *
+     * Mengembalikan SATU baris per bulan — bukan satu baris per transaksi —
+     * sehingga bebannya tidak ikut bertambah bersama jumlah transaksi.
+     *
+     * @return Collection<string, float>
+     */
+    private function monthlyTotals(): Collection
+    {
+        $query = Expense::query()
+            ->whereNotNull('date_shopping')
+            ->reorder();
+
+        $dateColumn = $query->getModel()->qualifyColumn('date_shopping');
+        $expression = MonthExpression::for(
+            $query->getConnection()->getDriverName(),
+            $dateColumn,
+        );
+
+        return $expression === null
+            ? $this->monthlyTotalsInPhp($query, $dateColumn)
+            : $this->monthlyTotalsInSql($query, $expression);
+    }
+
+    /**
+     * Jalur SQL: GROUP BY ekspresi bulan, SUM dihitung di database.
+     *
+     * @return Collection<string, float>
+     */
+    private function monthlyTotalsInSql(Builder $query, string $expression): Collection
+    {
+        $amount = $query->getModel()->qualifyColumn('amount');
+
+        return $query
+            ->selectRaw("{$expression} AS month_key, COALESCE(SUM({$amount}), 0) AS month_total")
+            ->groupByRaw($expression)
+            ->orderByRaw($expression)
+            ->get()
+            ->mapWithKeys(fn (Expense $row): array => [
+                (string) $row->getAttribute('month_key') => (float) $row->getAttribute('month_total'),
+            ]);
+    }
+
+    /**
+     * Jalur fallback PHP untuk driver tanpa ekspresi bulan native
+     * (pola yang sama persis dengan KasArusReport).
+     *
+     * @return Collection<string, float>
+     */
+    private function monthlyTotalsInPhp(Builder $query, string $dateColumn): Collection
+    {
+        $amount = $query->getModel()->qualifyColumn('amount');
+
+        return $query
+            ->select([$dateColumn, $amount])
+            ->get()
+            ->groupBy(fn (Expense $row): string => $row->date_shopping->format(MonthExpression::format()))
+            ->map(fn (Collection $rows): float => (float) $rows->sum('amount'));
     }
 }

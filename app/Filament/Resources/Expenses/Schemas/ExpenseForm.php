@@ -262,6 +262,14 @@ class ExpenseForm
                             ->numeric()
                             ->prefix('Rp')
                             ->minValue(0)
+                            // Sama seperti field Total di atas: kembalian yang dikoreksi
+                            // manual harus tetap di bawah kapasitas kolom decimal(14,2),
+                            // supaya user dapat pesan validasi ramah — bukan
+                            // SQLSTATE[22003] "numeric field overflow" saat disimpan.
+                            ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                            ->validationMessages([
+                                'max' => MoneyFormatter::maxInputMessage(),
+                            ])
                             ->placeholder('0')
                             ->columnSpan(1),
 
@@ -293,6 +301,12 @@ class ExpenseForm
                             ->relationship()
                             ->defaultItems(0)
                             ->addActionLabel('Tambah Item')
+                            // Batas atas qty/price/subtotal disamakan dengan field
+                            // Total (MoneyFormatter::MAX_INPUT_AMOUNT). Tanpa ini user
+                            // bisa mengetik angka berapa pun, lalu PostgreSQL melempar
+                            // SQLSTATE[22003] "numeric field overflow" saat menyimpan
+                            // (kolom decimal(14,2)) — user melihat error teknis, bukan
+                            // pesan validasi yang bisa ditindaklanjuti.
                             // Alokasi grid: layar besar (lg) memakai 12 kolom —
                             // Nama 4, Qty 2, Harga 3, Subtotal 3 (Harga & Subtotal
                             // diberi porsi lebih lebar supaya angka 6 digit ke
@@ -314,6 +328,10 @@ class ExpenseForm
                                     ->numeric()
                                     ->step(0.01)
                                     ->minValue(0)
+                                    ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                                    ->validationMessages([
+                                        'max' => MoneyFormatter::maxInputMessage(),
+                                    ])
                                     ->default(1)
                                     ->formatStateUsing($normalizeNumber)
                                     ->live(onBlur: true)
@@ -328,6 +346,10 @@ class ExpenseForm
                                     ->prefix('Rp')
                                     ->step(0.01)
                                     ->minValue(0)
+                                    ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                                    ->validationMessages([
+                                        'max' => MoneyFormatter::maxInputMessage(),
+                                    ])
                                     ->default(0)
                                     ->formatStateUsing($normalizeNumber)
                                     ->live(onBlur: true)
@@ -342,6 +364,10 @@ class ExpenseForm
                                     ->prefix('Rp')
                                     ->step(0.01)
                                     ->minValue(0)
+                                    ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                                    ->validationMessages([
+                                        'max' => MoneyFormatter::maxInputMessage(),
+                                    ])
                                     ->default(0)
                                     ->formatStateUsing($normalizeNumber)
                                     ->placeholder('Otomatis dari qty × harga')
@@ -349,13 +375,22 @@ class ExpenseForm
                             ]),
                     ]),
 
-                // Field teknis disembunyikan dari form, akan diisi otomatis oleh sistem
+                // Field teknis: `note` (teks OCR mentah) & `parsed_data` (JSON hasil
+                // parsing AI) tidak pernah diedit user — keduanya diisi otomatis oleh
+                // CreateExpense/EditExpense (OCR) dan AIParserJob (parsing AI).
+                //
+                // ->dehydrated(false) memastikan keduanya TIDAK ikut terkirim saat form
+                // disave. Tanpa itu, field tersembunyi yang kosong akan menimpa kolom
+                // di database dengan NULL setiap kali user menyimpan halaman Edit —
+                // menghapus teks OCR & hasil parsing yang sudah ada tanpa disengaja.
                 Textarea::make('note')
                     ->hidden()
+                    ->dehydrated(false)
                     ->columnSpanFull(),
 
                 TextInput::make('parsed_data')
-                    ->hidden(),
+                    ->hidden()
+                    ->dehydrated(false),
             ]);
     }
 }

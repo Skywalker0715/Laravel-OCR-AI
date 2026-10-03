@@ -4,8 +4,10 @@ namespace App\Services;
 
 use App\Models\Budget;
 use App\Models\Category;
+use App\Models\Debt;
 use App\Models\Expense;
 use App\Models\ExpenseItem;
+use App\Models\Income;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
@@ -13,8 +15,8 @@ use Illuminate\Support\Facades\DB;
  * Menghapus satu akun user BESERTA seluruh datanya secara permanen:
  * expense items, expenses (+ foto struk fisik di disk 'receipts'),
  * budgets, kategori PRIBADI (kategori default sistem user_id NULL
- * dipakai bersama dan tidak disentuh), notifikasi database, lalu
- * record user itu sendiri.
+ * dipakai bersama dan tidak disentuh), pemasukan (incomes), utang
+ * piutang (debts), notifikasi database, lalu record user itu sendiri.
  *
  * Semua dijalankan dalam satu database transaction: jika ada langkah
  * yang gagal di tengah, seluruh penghapusan di-rollback dan tidak ada
@@ -63,10 +65,25 @@ class DeleteUserAccountService
                 ->where('user_id', $user->getKey())
                 ->delete();
 
-            // 5. Semua notifikasi database milik user (lonceng Filament).
+            // 5. Semua pemasukan milik user. FK incomes.user_id memang
+            //    cascadeOnDelete, tapi dihapus EKSPLISIT di sini agar urutan
+            //    & cakupannya terbaca jelas (dan teruji), konsisten dengan
+            //    pola expense/budget di atas.
+            Income::query()
+                ->withoutGlobalScopes()
+                ->where('user_id', $user->getKey())
+                ->delete();
+
+            // 6. Semua utang piutang milik user (alasan sama dengan incomes).
+            Debt::query()
+                ->withoutGlobalScopes()
+                ->where('user_id', $user->getKey())
+                ->delete();
+
+            // 7. Semua notifikasi database milik user (lonceng Filament).
             $user->notifications()->delete();
 
-            // 6. Terakhir, hapus record user itu sendiri.
+            // 8. Terakhir, hapus record user itu sendiri.
             $user->delete();
         });
     }
