@@ -61,9 +61,9 @@ class BudgetForm
                             // berapa pun, lalu PostgreSQL melempar SQLSTATE[22003]
                             // "numeric field overflow" saat menyimpan (nominal besar
                             // ala UMKM seperti 300 juta / 3 miliar ikut gagal).
-                            ->maxValue(MoneyFormatter::MAX_INPUT_AMOUNT)
+                            ->maxValue(MoneyFormatter::MAX_BUDGET_AMOUNT)
                             ->validationMessages([
-                                'max' => MoneyFormatter::maxInputMessage(),
+                                'max' => MoneyFormatter::maxBudgetInputMessage(),
                             ])
                             ->placeholder('cth. 2000000')
                             ->columnSpan(1),

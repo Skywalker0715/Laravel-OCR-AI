@@ -312,6 +312,27 @@ test('nominal besar (miliar) tersimpan tanpa error overflow', function () {
     expect((int) $budget->refresh()->amount)->toBe(3_000_000_000);
 });
 
+test('nominal budget triliunan tersimpan sampai kapasitas kolom database', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+
+    $budget = Budget::create([
+        'user_id' => $user->id,
+        'category_id' => null,
+        'amount' => 100000,
+        'month' => 9,
+        'year' => 2026,
+    ]);
+
+    Livewire::test(EditBudget::class, ['record' => $budget->getKey()])
+        ->fillForm(['amount' => (string) MoneyFormatter::MAX_BUDGET_AMOUNT])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect((string) $budget->refresh()->amount)
+        ->toBe((string) MoneyFormatter::MAX_BUDGET_AMOUNT.'.00');
+});
+
 test('kolom budgets.amount memakai presisi yang sama dengan kolom uang lain', function () {
     $amountType = function (string $table): string {
         $column = collect(Schema::getColumns($table))->firstWhere('name', 'amount');
@@ -338,10 +359,10 @@ test('nominal melebihi batas form ditolak dengan pesan validasi, bukan error que
     ]);
 
     Livewire::test(EditBudget::class, ['record' => $budget->getKey()])
-        ->fillForm(['amount' => (string) (MoneyFormatter::MAX_INPUT_AMOUNT + 1)])
+        ->fillForm(['amount' => (string) (MoneyFormatter::MAX_BUDGET_AMOUNT + 1)])
         ->call('save')
         ->assertHasFormErrors(['amount'])
-        ->assertSee(MoneyFormatter::maxInputMessage());
+        ->assertSee(MoneyFormatter::maxBudgetInputMessage());
 
     // Tidak ada perubahan yang lolos ke database saat validasi gagal.
     expect((int) $budget->refresh()->amount)->toBe(250_000);

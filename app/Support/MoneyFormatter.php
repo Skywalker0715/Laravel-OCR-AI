@@ -24,6 +24,9 @@ class MoneyFormatter
      */
     public const MAX_INPUT_AMOUNT = 1_000_000_000_000;
 
+    /** Whole-rupiah limit that fits in budgets.amount decimal(15,2). */
+    public const MAX_BUDGET_AMOUNT = 9_999_999_999_999;
+
     /** Format nominal menjadi "Rp 9.300" / "Rp 9.300,50", atau null bila kosong. */
     public static function format(int|float|string|null $value): ?string
     {
@@ -60,5 +63,11 @@ class MoneyFormatter
     public static function maxInputMessage(): string
     {
         return 'Nominal terlalu besar. Maksimal '.self::format(self::MAX_INPUT_AMOUNT).'.';
+    }
+
+    /** Validation message for the Budget column's database capacity. */
+    public static function maxBudgetInputMessage(): string
+    {
+        return 'Nominal terlalu besar. Maksimal '.self::format(self::MAX_BUDGET_AMOUNT).'.';
     }
 }
