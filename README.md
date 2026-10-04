@@ -10,8 +10,6 @@ Aplikasi web untuk mencatat **keuangan secara lengkap** - bukan hanya pengeluara
 
 Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-user, kategori pengeluaran usaha).
 
-> ⚠️ **Produk digital: setelah dibeli dan diunduh, tidak dapat di-refund.** Pastikan server Anda memenuhi bagian Requirement (PHP 8.2+, PostgreSQL 13+, Tesseract OCR, dan queue worker). API key Cohere tidak disertakan. Hasil OCR/AI dapat keliru.
-
 ## 🚀 Fitur
 
 - **Upload struk + OCR** - Tesseract OCR (bahasa Indonesia + Inggris), kompresi gambar otomatis (GD) sebelum diproses.
@@ -449,14 +447,6 @@ app/Console/Commands/       expenses:reprocess, expenses:assign-default-category
                             receipts:move-to-private-disk
 ```
 
-## 🆘 Dukungan
-
-Mencakup perbaikan bug pada source code asli dan bantuan instalasi dasar sesuai dokumen ini. Tidak mencakup kustomisasi, pengaturan server/hosting, biaya atau gangguan layanan pihak ketiga (mis. Cohere), maupun kesalahan akibat modifikasi kode. Hubungi penjual lewat kanal pesan/komentar pada halaman produk di marketplace tempat Anda membeli, dengan menyertakan langkah yang dilakukan, pesan error lengkap, serta versi PHP/PostgreSQL dan sistem operasi Anda.
-
-## 🧾 Kebijakan Pembelian
-
-Ini produk digital (source code) yang bisa langsung diunduh dan disalin, sehingga **tidak dapat di-refund** setelah diunduh, kecuali ketentuan marketplace tempat Anda membeli atau hukum yang berlaku menentukan lain. Sebelum membeli, pastikan server Anda memenuhi bagian Requirement. API key Cohere tidak disertakan. Hasil OCR/AI dapat keliru, dan aplikasi ini bukan nasihat keuangan atau pajak. Lakukan backup database secara berkala.
-
 ## 📄 Lisensi
 
-Source code ini adalah **produk komersial**. Penggunaan, modifikasi, dan distribusi tunduk pada ketentuan lisensi yang berlaku di marketplace tempat Anda membelinya (mis. Regular License / Extended License). Dilarang menyebarkan ulang atau menjual kembali source code ini sebagai produk yang berdiri sendiri di luar ketentuan lisensi tersebut.
+Hak cipta dilindungi. Kode ditampilkan sebagai portofolio; penggunaan komersial memerlukan lisensi.
