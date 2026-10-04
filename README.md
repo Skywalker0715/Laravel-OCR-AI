@@ -10,6 +10,8 @@ Aplikasi web untuk mencatat **keuangan secara lengkap** - bukan hanya pengeluara
 
 Dibangun untuk dua segmen: **personal** (catatan harian) dan **UMKM** (multi-user, kategori pengeluaran usaha).
 
+> ⚠️ **Produk digital: setelah dibeli dan diunduh, tidak dapat di-refund.** Pastikan server Anda memenuhi bagian Requirement (PHP 8.2+, PostgreSQL 13+, Tesseract OCR, dan queue worker). API key Cohere tidak disertakan. Hasil OCR/AI dapat keliru.
+
 ## 🚀 Fitur
 
 - **Upload struk + OCR** - Tesseract OCR (bahasa Indonesia + Inggris), kompresi gambar otomatis (GD) sebelum diproses.
@@ -56,7 +58,7 @@ flowchart TD
 
 - PHP >= 8.2 dengan ekstensi `pdo_pgsql`, `gd`, `mbstring`
 - Composer, Node.js + npm (mensupply `npx concurrently` untuk `composer run dev`)
-- PostgreSQL >= 13
+- PostgreSQL >= 13 (satu-satunya database yang diuji; MySQL/MariaDB belum diuji)
 - **Tesseract OCR** ter-install di server + language data **`ind` dan `eng`**
   (Windows: installer UB-Mannheim — pastikan mencentang kedua language pack, atau salin `ind.traineddata` & `eng.traineddata` ke `C:\Program Files\Tesseract-OCR\tessdata`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ind`)
 - Cohere API key (opsional - tanpa key, parsing struk tetap jalan memakai parser fallback regex, **tetapi fitur Tanya AI tidak bisa menjawab**)
@@ -281,6 +283,20 @@ Parsing dieksekusi langsung saat upload, jadi tidak perlu worker. Trade-off: req
 
 Panel admin tersedia di **`/admin`** - login dengan akun hasil seed (`test@example.com` / `password`, **wajib diganti di server yang dapat diakses orang lain**) atau registrasi akun baru (lihat catatan keamanan di bawah).
 
+## 🛟 Troubleshooting
+
+| Gejala | Penyebab | Solusi |
+|--------|----------|--------|
+| Struk tersimpan tapi vendor/total/item **kosong terus** | Queue worker tidak berjalan | Jalankan `php artisan queue:work --timeout=150` (atau `composer run dev`). Cek `php artisan queue:failed`. |
+| OCR kosong / "gagal diproses" | Tesseract belum terpasang atau language data kurang | Pastikan `tesseract --list-langs` bisa dijalankan dan menampilkan `ind` dan `eng`. Foto buram juga menurunkan akurasi. |
+| Halaman **tanpa CSS** | Asset belum dibuild | `npm install && npm run build` |
+| **Tanya AI** gagal menjawab | `COHERE_API_KEY` kosong/salah, kuota trial habis, atau nama model salah | Periksa key dan `COHERE_MODEL`. Trial key terbatas 1.000 panggilan/bulan. |
+| Perubahan `.env`/kode **tidak terbaca** | Cache atau worker lama | `php artisan optimize:clear`, `php artisan queue:restart`, lalu jalankan ulang `composer run dev`. |
+| Error 419 / login tidak tersimpan | `APP_URL` atau cookie tidak sesuai | Samakan `APP_URL` dengan alamat yang dibuka. Di `http://`, jangan aktifkan `SESSION_SECURE_COOKIE=true`. |
+| Error saat migrasi | Memakai database selain PostgreSQL | Gunakan PostgreSQL 13+ (satu-satunya yang diuji). |
+| `SQLSTATE[08006] could not fork new process for connection` (di **Windows**) | Service PostgreSQL bermasalah, bukan bug aplikasi | Restart service PostgreSQL lewat `services.msc`, tutup proses `php.exe` sisa, lalu jalankan ulang. |
+| Foto struk tidak tampil | Izin folder `storage` | Pastikan `storage/` dapat ditulis oleh user web server. |
+
 ## 🔄 Upgrade dari Versi Lama (opsional)
 
 Bila memakai versi lama aplikasi (foto struk masih di `storage/app/public/receipts`), pindahkan ke disk privat baru:
@@ -432,6 +448,14 @@ app/Models/Scopes/          OwnedByUserScope (isolasi data per-user)
 app/Console/Commands/       expenses:reprocess, expenses:assign-default-category,
                             receipts:move-to-private-disk
 ```
+
+## 🆘 Dukungan
+
+Mencakup perbaikan bug pada source code asli dan bantuan instalasi dasar sesuai dokumen ini. Tidak mencakup kustomisasi, pengaturan server/hosting, biaya atau gangguan layanan pihak ketiga (mis. Cohere), maupun kesalahan akibat modifikasi kode. Hubungi penjual lewat kanal pesan/komentar pada halaman produk di marketplace tempat Anda membeli, dengan menyertakan langkah yang dilakukan, pesan error lengkap, serta versi PHP/PostgreSQL dan sistem operasi Anda.
+
+## 🧾 Kebijakan Pembelian
+
+Ini produk digital (source code) yang bisa langsung diunduh dan disalin, sehingga **tidak dapat di-refund** setelah diunduh, kecuali ketentuan marketplace tempat Anda membeli atau hukum yang berlaku menentukan lain. Sebelum membeli, pastikan server Anda memenuhi bagian Requirement. API key Cohere tidak disertakan. Hasil OCR/AI dapat keliru, dan aplikasi ini bukan nasihat keuangan atau pajak. Lakukan backup database secara berkala.
 
 ## 📄 Lisensi
 
